@@ -489,8 +489,7 @@ with st.expander("Диагностика (почему λ₂ может быть
     if G.number_of_nodes() > 0:
         H = lcc_subgraph(G)
         st.write(f"- LCC: n={H.number_of_nodes()}, e={H.number_of_edges()}, connected={nx.is_connected(H) if H.number_of_nodes()>0 else False}")
-    st.write("- Если граф несвязный → λ₂(global)=0 по определению.")
-    st.write("- λ₂(LCC) считается на крупнейшей компоненте; если она связна и n≥3 → обычно >0.")
+
 
 # =========================
 # Tabs UI
