@@ -164,8 +164,11 @@ def experiments_for_graph(graph_id: str):
     """Filter experiments belonging to a particular graph id."""
     return [e for e in st.session_state["experiments"] if e.get("graph_id") == graph_id]
 
-SRC_COL = meta["SRC_COL"]
-DST_COL = meta["DST_COL"]
+# NOTE:
+# Do NOT reference a global `meta` here.
+# `meta` is produced only when a file is uploaded (via `coerce_fixed_format`).
+# Source/target column names are stored per-graph in:
+#   st.session_state["graphs"][gid]["tags"] = {"src_col": ..., "dst_col": ...}
 
 # =========================
 # Sidebar: Workspace I/O + Add graphs
