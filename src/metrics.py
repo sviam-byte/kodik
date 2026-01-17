@@ -20,6 +20,30 @@ def add_dist_attr(G: nx.Graph) -> nx.Graph:
     return H
 
 
+def _shannon_entropy_from_counts(counts: np.ndarray) -> float:
+    """Shannon entropy H = -sum p log2 p for a nonnegative count vector."""
+    counts = np.asarray(counts, dtype=float)
+    counts = counts[np.isfinite(counts)]
+    counts = counts[counts > 0]
+    if counts.size == 0:
+        return float("nan")
+    p = counts / counts.sum()
+    return float(-(p * np.log2(p)).sum())
+
+
+def _shannon_entropy_from_values(values, bins: int = 32) -> float:
+    """Histogram-based Shannon entropy for a list/array of real values."""
+    xs = np.asarray(list(values), dtype=float)
+    xs = xs[np.isfinite(xs)]
+    if xs.size == 0:
+        return float("nan")
+    # If all equal -> entropy 0 (single bin effectively).
+    if float(xs.min()) == float(xs.max()):
+        return 0.0
+    hist, _ = np.histogram(xs, bins=int(max(2, bins)))
+    return _shannon_entropy_from_counts(hist)
+
+
 def approx_weighted_efficiency(G: nx.Graph, sources_k: int, seed: int) -> float:
     """
     E_w = (1/(N(N-1))) * sum_{i!=j} 1/d_ij, dist = 1/weight
@@ -170,7 +194,17 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
     """Compute a suite of scalar metrics for analysis dashboards."""
     N = G.number_of_nodes()
     E = G.number_of_edges()
-    C = nx.number_connected_components(G) if N > 0 else 0
+    if N > 0:
+        try:
+            C = (
+                nx.number_connected_components(G)
+                if not G.is_directed()
+                else nx.number_weakly_connected_components(G)
+            )
+        except Exception:
+            C = 1
+    else:
+        C = 0
     dens = nx.density(G) if N > 1 else 0.0
     avg_deg = (2 * E / N) if N > 0 else 0.0
 
@@ -193,6 +227,42 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
 
     beta = int(E - N + C) if N > 0 else 0
 
+    # -----------------------------
+    # Entropy Profile
+    # -----------------------------
+    degs = np.array([d for _, d in G.degree()], dtype=float)
+    if degs.size > 0:
+        _, deg_counts = np.unique(degs, return_counts=True)
+        H_deg = _shannon_entropy_from_counts(deg_counts)
+    else:
+        H_deg = float("nan")
+
+    ws = []
+    cs = []
+    for _, _, d in G.edges(data=True):
+        w = d.get("weight", np.nan)
+        c = d.get("confidence", np.nan)
+        try:
+            ws.append(float(w))
+        except Exception:
+            pass
+        try:
+            cs.append(float(c))
+        except Exception:
+            pass
+    H_w = _shannon_entropy_from_values(ws, bins=32) if ws else float("nan")
+    H_conf = _shannon_entropy_from_values(cs, bins=32) if cs else float("nan")
+
+    # Redundancy β (cycle fraction proxy).
+    if E > 0:
+        beta_red = (E - (N - C)) / float(E)
+    else:
+        beta_red = float("nan")
+
+    # Relaxation time τ (diffusion-like proxy).
+    tau_relax = (1.0 / l2) if (l2 and np.isfinite(l2) and l2 > 1e-12) else float("nan")
+    epi_thr = (1.0 / lmax) if (lmax and np.isfinite(lmax) and lmax > 1e-12) else float("nan")
+
     return {
         "N": N,
         "E": E,
@@ -200,15 +270,21 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
         "density": float(dens),
         "avg_degree": float(avg_deg),
         "beta": beta,
+        "beta_red": float(beta_red) if np.isfinite(beta_red) else float("nan"),
         "lcc_size": int(lcc_size),
         "lcc_frac": float(lcc_frac),
         "eff_w": float(eff_w),
         "l2_lcc": float(l2),
         "tau_lcc": float(tau),
+        "tau_relax": float(tau_relax) if np.isfinite(tau_relax) else float("nan"),
         "lmax": float(lmax),
         "thresh": float(thresh),
+        "epi_thr": float(epi_thr) if np.isfinite(epi_thr) else float("nan"),
         "mod": float(Q),
         "entropy_deg": float(ent),
+        "H_deg": float(H_deg) if np.isfinite(H_deg) else float("nan"),
+        "H_w": float(H_w) if np.isfinite(H_w) else float("nan"),
+        "H_conf": float(H_conf) if np.isfinite(H_conf) else float("nan"),
         "assortativity": float(assort) if np.isfinite(assort) else 0.0,
         "clustering": float(clust) if np.isfinite(clust) else 0.0,
         "diameter_approx": int(diam) if diam is not None else None,
