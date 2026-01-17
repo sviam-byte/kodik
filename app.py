@@ -1,6 +1,5 @@
 # =========================
-# app.py (PART 1/2)
-# Paste this first. Then say "продолжать" for PART 2/2.
+# app.py
 # =========================
 
 import time
@@ -426,12 +425,8 @@ def run_node_attack_suite(
     tag: str = ""
 ):
     """
-    Node-attack batch. Supports NEW kinds:
-    - low_degree
-    - weak_strength
-    These are executed as FALLBACK-only unless src.attacks.run_attack supports them.
-    If src.run_attack doesn't support them, we emulate by using the fallback removal order
-    and computing metrics ourselves (static-order; not adaptive).
+    Node-attack batch runner.
+    NOTE: src.attacks.run_attack now supports adaptive weak-node strategies.
     """
     curves = []
 
@@ -442,26 +437,14 @@ def run_node_attack_suite(
         for i in range(nseeds):
             seed_i = int(base_seed) + 1000 * (abs(hash(kind)) % 97) + i
 
-            # Try src.run_attack first for known kinds; for weak kinds, we emulate.
-            if kind in ("random", "degree", "betweenness", "kcore", "richclub_top"):
-                df_hist, aux = run_attack(
-                    G, kind, float(frac), int(steps), int(seed_i), int(eff_k),
-                    rc_frac=float(rc_frac), compute_heavy_every=int(heavy_freq)
-                )
-                df_hist = _forward_fill_heavy(df_hist)
-                removed_order = _extract_removed_order(aux) or _fallback_removal_order(G, kind, seed_i)
-                aux_payload = {"removed_order": removed_order, "mode": "src_run_attack_or_fallback"}
-            else:
-                # Emulated weak node attacks (static order; still valid as a diagnostic)
-                removed_order = _fallback_removal_order(G, kind, seed_i)
-                df_hist = emulate_node_attack_from_order(
-                    G, removed_order,
-                    frac=float(frac), steps=int(steps),
-                    seed=int(seed_i), eff_k=int(eff_k),
-                    compute_heavy_every=int(heavy_freq)
-                )
-                df_hist = _forward_fill_heavy(df_hist)
-                aux_payload = {"removed_order": removed_order, "mode": "emulated_static_order"}
+            # src.attacks.run_attack handles all node kinds (including weak nodes).
+            df_hist, aux = run_attack(
+                G, kind, float(frac), int(steps), int(seed_i), int(eff_k),
+                rc_frac=float(rc_frac), compute_heavy_every=int(heavy_freq)
+            )
+            df_hist = _forward_fill_heavy(df_hist)
+            removed_order = _extract_removed_order(aux) or _fallback_removal_order(G, kind, seed_i)
+            aux_payload = {"removed_order": removed_order, "mode": "src_run_attack_or_fallback"}
 
             phase_info = classify_phase_transition(df_hist)
 
@@ -982,7 +965,8 @@ with tab_attack:
     st.subheader("Single run")
     family = st.radio("Тип атаки", ["Node (узлы)", "Edge (рёбра: слабые/сильные)"], horizontal=True)
 
-    col_setup, col_res = st.columns([1, 2])
+    # Parameters stay on top-left; results are rendered below full-width.
+    col_setup, _ = st.columns([1, 2])
 
     with col_setup:
         with st.container(border=True):
@@ -1006,8 +990,8 @@ with tab_attack:
                         "betweenness (Bridges)",
                         "kcore (Deep Core)",
                         "richclub_top (Top Strength)",
-                        "low_degree (Weak nodes)",      # NEW
-                        "weak_strength (Weak strength)"  # NEW
+                        "low_degree (Weak nodes)",       # adaptive in src.attacks
+                        "weak_strength (Weak strength)", # adaptive in src.attacks
                     ],
                 )
                 kind_map = {
@@ -1036,75 +1020,39 @@ with tab_attack:
 
             if st.button("🚀 RUN", type="primary", use_container_width=True):
                 if family.startswith("Node"):
-                    if kind in ("random", "degree", "betweenness", "kcore", "richclub_top"):
-                        with st.spinner(f"Node attack: {kind}"):
-                            df_hist, aux = run_attack(
-                                G_view, kind, float(frac), int(steps), int(seed_run), int(eff_k),
-                                rc_frac=0.1, compute_heavy_every=int(heavy_freq)
-                            )
-                            df_hist = _forward_fill_heavy(df_hist)
-                            removed_order = _extract_removed_order(aux) or _fallback_removal_order(G_view, kind, int(seed_run))
-                            phase_info = classify_phase_transition(df_hist)
+                    # All node kinds are handled by src.attacks (including adaptive weak nodes).
+                    with st.spinner(f"Node attack: {kind}"):
+                        df_hist, aux = run_attack(
+                            G_view, kind, float(frac), int(steps), int(seed_run), int(eff_k),
+                            rc_frac=0.1, compute_heavy_every=int(heavy_freq)
+                        )
+                        df_hist = _forward_fill_heavy(df_hist)
+                        removed_order = _extract_removed_order(aux) or _fallback_removal_order(G_view, kind, int(seed_run))
+                        phase_info = classify_phase_transition(df_hist)
 
-                            label = f"{active_entry['name']} | node:{kind} | seed={seed_run}"
-                            if tag:
-                                label += f" [{tag}]"
+                        label = f"{active_entry['name']} | node:{kind} | seed={seed_run}"
+                        if tag:
+                            label += f" [{tag}]"
 
-                            save_experiment(
-                                name=label,
-                                graph_id=active_entry["id"],
-                                kind=kind,
-                                params={
-                                    "attack_family": "node",
-                                    "frac": float(frac),
-                                    "steps": int(steps),
-                                    "seed": int(seed_run),
-                                    "phase": phase_info,
-                                    "compute_heavy_every": int(heavy_freq),
-                                    "eff_k": int(eff_k),
-                                    "removed_order": removed_order,
-                                    "mode": "src_run_attack_or_fallback",
-                                },
-                                df_hist=df_hist
-                            )
-                        st.success("Готово.")
-                        st.rerun()
-                    else:
-                        # weak node kinds emulated (static order)
-                        with st.spinner(f"Node attack (emulated): {kind}"):
-                            removed_order = _fallback_removal_order(G_view, kind, int(seed_run))
-                            df_hist = emulate_node_attack_from_order(
-                                G_view, removed_order,
-                                frac=float(frac), steps=int(steps),
-                                seed=int(seed_run), eff_k=int(eff_k),
-                                compute_heavy_every=int(heavy_freq)
-                            )
-                            df_hist = _forward_fill_heavy(df_hist)
-                            phase_info = classify_phase_transition(df_hist)
-
-                            label = f"{active_entry['name']} | node:{kind} | seed={seed_run}"
-                            if tag:
-                                label += f" [{tag}]"
-
-                            save_experiment(
-                                name=label,
-                                graph_id=active_entry["id"],
-                                kind=kind,
-                                params={
-                                    "attack_family": "node",
-                                    "frac": float(frac),
-                                    "steps": int(steps),
-                                    "seed": int(seed_run),
-                                    "phase": phase_info,
-                                    "compute_heavy_every": int(heavy_freq),
-                                    "eff_k": int(eff_k),
-                                    "removed_order": removed_order,
-                                    "mode": "emulated_static_order",
-                                },
-                                df_hist=df_hist
-                            )
-                        st.success("Готово (emulated).")
-                        st.rerun()
+                        save_experiment(
+                            name=label,
+                            graph_id=active_entry["id"],
+                            kind=kind,
+                            params={
+                                "attack_family": "node",
+                                "frac": float(frac),
+                                "steps": int(steps),
+                                "seed": int(seed_run),
+                                "phase": phase_info,
+                                "compute_heavy_every": int(heavy_freq),
+                                "eff_k": int(eff_k),
+                                "removed_order": removed_order,
+                                "mode": "src_run_attack_or_fallback",
+                            },
+                            df_hist=df_hist
+                        )
+                    st.success("Готово.")
+                    st.rerun()
 
                 else:
                     with st.spinner(f"Edge attack: {kind}"):
@@ -1139,44 +1087,54 @@ with tab_attack:
                     st.success("Готово.")
                     st.rerun()
 
-    with col_res:
-        st.markdown("### Последний результат (для текущего графа)")
+    # FULL-WIDTH RESULTS (rendered below the controls)
+    st.markdown("---")
+    st.markdown("## Последний результат (для текущего графа)")
 
-        exps_here = [e for e in st.session_state["experiments"] if e.get("graph_id") == active_entry["id"]]
-        if not exps_here:
-            st.info("Нет экспериментов. Запусти слева.")
-        else:
-            exps_here.sort(key=lambda x: x["created_at"], reverse=True)
-            last_exp = exps_here[0]
-            df_res = last_exp["history"].copy()
-            df_res = _forward_fill_heavy(df_res)
+    exps_here = [e for e in st.session_state["experiments"] if e.get("graph_id") == active_entry["id"]]
+    if not exps_here:
+        st.info("Нет экспериментов. Запусти сверху.")
+    else:
+        exps_here.sort(key=lambda x: x["created_at"], reverse=True)
+        last_exp = exps_here[0]
+        df_res = _forward_fill_heavy(last_exp["history"].copy())
 
-            ph = (last_exp.get("params") or {}).get("phase", {})
-            if ph:
-                st.caption(
-                    f"Phase: {'🔥 Abrupt' if ph.get('is_abrupt') else '🌊 Continuous'}"
-                    f" | critical_x ≈ {float(ph.get('critical_x', 0.0)):.3f}"
+        ph = (last_exp.get("params") or {}).get("phase", {})
+        if ph:
+            st.caption(
+                f"Phase: {'🔥 Abrupt' if ph.get('is_abrupt') else '🌊 Continuous'}"
+                f" | critical_x ≈ {float(ph.get('critical_x', 0.0)):.3f}"
+            )
+
+        tabA, tabB, tabC = st.tabs(["📉 Curves", "🌀 Phase views", "🧊 3D step-by-step"])
+
+        with tabA:
+            with st.expander("❔ Что означают метрики на графиках", expanded=False):
+                st.markdown(
+                    "- **lcc_frac**: доля узлов в гигантской компоненте (порядковый параметр перколяции)\n"
+                    "- **eff_w**: глобальная эффективность (в среднем насколько короткие пути; выше = сеть “связнее”)\n"
+                    "- **l2_lcc**: λ₂ (алгебраическая связность) для LCC; близко к 0 = “на грани распада”\n"
+                    "- **mod**: модульность сообществ; рост часто означает фрагментацию на кластеры\n"
                 )
+            fig = fig_metrics_over_steps(df_res, title="Метрики по шагам")
+            fig.update_layout(template="plotly_dark")
+            # Make lines visible (eff_w can look "missing" on dark themes).
+            fig.update_traces(mode="lines+markers")
+            fig.update_traces(line_width=3)
+            fig = _apply_plot_defaults(fig, height=980)
+            st.plotly_chart(fig, use_container_width=True)
 
-            tabA, tabB, tabC = st.tabs(["📉 Curves", "🌀 Phase views", "🧊 3D step-by-step"])
-
-            with tabA:
-                fig = fig_metrics_over_steps(df_res, title="Метрики по шагам")
-                fig.update_layout(template="plotly_dark")
-                fig = _apply_plot_defaults(fig, height=820)
-                st.plotly_chart(fig, use_container_width=True)
-
-                st.markdown("#### AUC (robustness) по выбранной метрике")
-                y_axis = st.selectbox("Метрика для AUC", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="auc_y_single")
-                if y_axis in df_res.columns and "removed_frac" in df_res.columns:
-                    xs = pd.to_numeric(df_res["removed_frac"], errors="coerce")
-                    ys = pd.to_numeric(df_res[y_axis], errors="coerce")
-                    mask = xs.notna() & ys.notna()
-                    if mask.sum() >= 2:
-                        auc_val = float(AUC_TRAP(ys[mask].to_numpy(), xs[mask].to_numpy()))
-                        st.metric("AUC", f"{auc_val:.6f}")
-                    else:
-                        st.info("Недостаточно точек для AUC.")
+            st.markdown("#### AUC (robustness) по выбранной метрике")
+            y_axis = st.selectbox("Метрика для AUC", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="auc_y_single")
+            if y_axis in df_res.columns and "removed_frac" in df_res.columns:
+                xs = pd.to_numeric(df_res["removed_frac"], errors="coerce")
+                ys = pd.to_numeric(df_res[y_axis], errors="coerce")
+                mask = xs.notna() & ys.notna()
+                if mask.sum() >= 2:
+                    auc_val = float(AUC_TRAP(ys[mask].to_numpy(), xs[mask].to_numpy()))
+                    st.metric("AUC", f"{auc_val:.6f}")
+                else:
+                    st.info("Недостаточно точек для AUC.")
 
             with tabB:
                 # Canonical order-vs-control
@@ -1568,4 +1526,3 @@ with tab_compare:
 # ============================================================
 st.markdown("---")
 st.caption("Kodik Lab | Streamlit + NetworkX | node/edge attacks + weak percolation")
-
