@@ -12,7 +12,7 @@ import scipy.sparse.linalg as spla
 import plotly.graph_objects as go
 import streamlit as st
 
-from scipy.integrate import trapz
+from scipy.integrate import trapezoid  # Fixed: use trapezoid instead of trapz
 from networkx.algorithms.community import louvain_communities, modularity as nx_modularity
 from networkx.algorithms.centrality import betweenness_centrality
 from networkx.algorithms.core import core_number
@@ -21,9 +21,6 @@ from networkx.algorithms.cluster import average_clustering
 from networkx.algorithms.distance_measures import diameter
 from networkx.algorithms.shortest_paths import average_shortest_path_length
 from networkx.generators.stochastic_block_model import stochastic_block_model
-
-# Assuming src modules are available; if not, integrate or stub
-# For this rewrite, I'll integrate key functions from src into helpers where needed.
 
 # -------------------------
 # Page Config
@@ -435,7 +432,7 @@ def run_attack(
         if removed_total >= total_remove:
             break
     df_hist = pd.DataFrame(history)
-    df_hist["auc_lcc"] = trapz(df_hist["lcc_frac"], df_hist["removed_frac"])
+    df_hist["auc_lcc"] = trapezoid(df_hist["lcc_frac"], df_hist["removed_frac"])  # Fixed: use trapezoid
     return df_hist, states
 
 
