@@ -1,6 +1,61 @@
 import json
 import base64
 import pandas as pd
+import numpy as np
+
+
+def _json_safe(x):
+    """
+    Recursively convert common numpy/pandas types to JSON-serializable python objects.
+    This prevents: TypeError: Object of type ... is not JSON serializable
+    """
+    if x is None or isinstance(x, (str, bool, int, float)):
+        return x
+
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return float(x)
+    if isinstance(x, (np.bool_,)):
+        return bool(x)
+
+    if isinstance(x, np.ndarray):
+        return _json_safe(x.tolist())
+
+    try:
+        if pd.isna(x):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(x, (pd.Timestamp, pd.Timedelta)):
+        return str(x)
+
+    if isinstance(x, dict):
+        out = {}
+        for k, v in x.items():
+            if not isinstance(k, str):
+                k = str(k)
+            out[k] = _json_safe(v)
+        return out
+
+    if isinstance(x, (list, tuple)):
+        return [_json_safe(v) for v in x]
+
+    if isinstance(x, set):
+        return [_json_safe(v) for v in sorted(list(x), key=lambda z: str(z))]
+
+    if isinstance(x, pd.Series):
+        return _json_safe(x.to_list())
+    if isinstance(x, pd.DataFrame):
+        return _json_safe(x.to_dict(orient="records"))
+
+    return str(x)
+
+
+def _json_dumps_bytes(payload: dict) -> bytes:
+    safe_payload = _json_safe(payload)
+    return json.dumps(safe_payload, ensure_ascii=False, indent=2).encode("utf-8")
 
 
 def _df_to_b64_csv(df: pd.DataFrame) -> str:
@@ -46,7 +101,7 @@ def export_workspace_json(graphs: dict, experiments: list) -> bytes:
         )
 
     payload = {"graphs": g_out, "experiments": e_out}
-    return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    return _json_dumps_bytes(payload)
 
 
 def import_workspace_json(blob: bytes) -> tuple[dict, list]:
@@ -101,7 +156,7 @@ def export_experiments_json(experiments: list) -> bytes:
             }
         )
     payload = {"experiments": e_out}
-    return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    return _json_dumps_bytes(payload)
 
 
 def import_experiments_json(blob: bytes) -> list:

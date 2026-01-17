@@ -997,7 +997,7 @@ with tab_attack:
     st.subheader("Single run")
     family = st.radio(
         "Тип атаки",
-        ["Node (узлы)", "Edge (рёбра: слабые/сильные)", "Mix/Entropy ()"],
+        ["Node (узлы)", "Edge (рёбра: слабые/сильные)", "Mix/Entropy (Hrish)"],
         horizontal=True,
     )
 
@@ -1056,7 +1056,7 @@ with tab_attack:
 
             else:
                 kind = st.selectbox(
-                    "Режим энтропии",
+                    "Режим Hrish",
                     [
                         "hrish_mix",
                         "mix_degree_preserving",
@@ -1249,7 +1249,7 @@ with tab_attack:
                 txt = """
                 Ось X:
                   - removed_frac: доля удалённых узлов/рёбер (атаки).
-                  - mix_frac: уровень энтропизации (mix), 0..1.
+                  - mix_frac: уровень энтропизации (Hrish mix), 0..1.
 
                 Ось Y:
                   - lcc_frac: доля LCC (перколяция).
