@@ -2,78 +2,47 @@ import random
 import networkx as nx
 
 
-def gnm_null_model(G: nx.Graph, seed: int) -> nx.Graph:
-    """
-    Erdos-Renyi G(n, m) preserving N and E.
-    """
-    n = G.number_of_nodes()
-    m = G.number_of_edges()
-    H = nx.gnm_random_graph(n, m, seed=int(seed))
-    # relabel to original node IDs (keep UI consistent)
-    nodes = list(G.nodes())
-    mapping = {i: nodes[i] for i in range(len(nodes))}
-    H = nx.relabel_nodes(H, mapping)
-    return H
+def make_er_gnm(n: int, m: int, seed: int) -> nx.Graph:
+    """Generate an Erdos-Renyi G(n,m) graph."""
+    return nx.gnm_random_graph(int(n), int(m), seed=int(seed))
 
 
-def configuration_null_model(G: nx.Graph, seed: int) -> nx.Graph:
+def make_configuration_model(G_base: nx.Graph, seed: int) -> nx.Graph:
     """
-    Configuration model preserving degree sequence (topology only).
-    Weighted degree distribution is NOT preserved, only degrees.
+    degree-preserving-ish null model.
+    networkx.configuration_model возвращает мультиграф и петли.
+    Мы приводим к простому графу.
     """
-    degs = [d for _, d in G.degree()]
-    # networkx uses numpy RNG internally; seed is ok
+    degs = [d for _, d in G_base.degree()]
     M = nx.configuration_model(degs, seed=int(seed))
-    H = nx.Graph(M)  # remove multi-edges by collapsing
+    H = nx.Graph(M)  # collapse parallel edges
     H.remove_edges_from(nx.selfloop_edges(H))
-
-    # relabel to original IDs
-    nodes = list(G.nodes())
-    mapping = {i: nodes[i] for i in range(len(nodes))}
-    H = nx.relabel_nodes(H, mapping)
     return H
 
 
-def rewire_mix(G: nx.Graph, p: float, seed: int, swaps_per_edge: float = 0.5) -> nx.Graph:
+def rewire_mix(G_base: nx.Graph, p: float, seed: int) -> nx.Graph:
     """
-    "Mix original with random" via double-edge swaps.
-    p=0 -> original
-    p=1 -> lots of rewiring
-
-    We do:
-      ns = int(p * swaps_per_edge * E)
-      double_edge_swap preserves degree sequence.
+    Постепенная хаотизация через double_edge_swap.
+    p=0 -> оригинал
+    p=1 -> сильная рандомизация (но сохраняем степени)
     """
-    H = G.copy()
-    E = H.number_of_edges()
-    if E < 2:
+    p = float(max(0.0, min(1.0, p)))
+    H = G_base.copy()
+    if H.number_of_edges() < 2 or H.number_of_nodes() < 4 or p <= 0:
         return H
 
-    ns = int(float(p) * float(swaps_per_edge) * float(E))
-    ns = max(0, ns)
+    # number of swaps scales with E
+    swaps = int(p * H.number_of_edges() * 5)  # коэффициент "агрессивности"
+    swaps = max(1, swaps)
 
-    if ns == 0:
-        return H
+    # tries needs be larger
+    tries = swaps * 10
 
-    # double_edge_swap may fail if graph too constrained -> we allow max_tries
-    nx.double_edge_swap(H, nswap=ns, max_tries=ns * 20, seed=int(seed))
-    return H
+    try:
+        nx.double_edge_swap(H, nswap=swaps, max_tries=tries, seed=int(seed))
+    except Exception:
+        # if swap fails due to constraints, return what we have
+        pass
 
-
-def copy_weights_from_original(G_orig: nx.Graph, H: nx.Graph, seed: int) -> nx.Graph:
-    """
-    Optional: assign weights to null-model edges by sampling weights from original edge weights.
-    Not "scientifically unique", but keeps weight distribution comparable.
-    """
-    import random
-
-    rng = random.Random(int(seed))
-    ws = [float(d.get("weight", 1.0)) for _, _, d in G_orig.edges(data=True)]
-    if not ws:
-        return H
-
-    for u, v in H.edges():
-        H[u][v]["weight"] = float(rng.choice(ws))
-        H[u][v]["confidence"] = 0.0
-
+    H.remove_edges_from(nx.selfloop_edges(H))
     return H

@@ -2,13 +2,8 @@ import io
 import pandas as pd
 
 
-def load_uploaded_as_raw(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """
-    Load raw user-uploaded bytes into a DataFrame.
-
-    Supports CSV and Excel formats. Column names are normalized by stripping
-    whitespace so downstream indexing is stable.
-    """
+def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Load uploaded bytes into a DataFrame for CSV or Excel inputs."""
     name = (filename or "").lower()
     bio = io.BytesIO(file_bytes)
 
@@ -17,7 +12,7 @@ def load_uploaded_as_raw(file_bytes: bytes, filename: str) -> pd.DataFrame:
     elif name.endswith(".xlsx") or name.endswith(".xls"):
         df = pd.read_excel(bio)
     else:
-        raise ValueError("Unsupported format (need csv/xlsx/xls).")
+        raise ValueError("Неподдерживаемый формат файла (нужен csv/xlsx/xls)")
 
     df.columns = [str(c).strip() for c in df.columns]
     return df

@@ -1,27 +1,53 @@
 import numpy as np
 import pandas as pd
 
-def phase_indicators(df_hist: pd.DataFrame) -> dict:
-    if df_hist is None or df_hist.empty:
-        return {"fc_step": None, "jump": np.nan, "fc_removed_frac": np.nan}
 
-    if "lcc_frac" not in df_hist.columns:
-        return {"fc_step": None, "jump": np.nan, "fc_removed_frac": np.nan}
+def classify_phase_transition(
+    df: pd.DataFrame,
+    x_col: str = "removed_frac",
+    y_col: str = "lcc_frac",
+) -> dict:
+    """
+    Эвристика "взрывного" распада:
+    - смотрим на дискретные скачки y между соседними точками
+    - если самый большой отрицательный скачок занимает большую долю амплитуды
+      и происходит в узком окне x -> считаем abrupt
+    """
+    if df is None or df.empty or x_col not in df.columns or y_col not in df.columns:
+        return {
+            "is_abrupt": False,
+            "critical_x": float("nan"),
+            "jump": 0.0,
+            "jump_fraction": 0.0,
+        }
 
-    s = df_hist["lcc_frac"].to_numpy(dtype=float)
-    if len(s) < 2:
-        return {"fc_step": int(df_hist["step"].iloc[-1]), "jump": 0.0, "fc_removed_frac": np.nan}
+    x = np.asarray(df[x_col], dtype=float)
+    y = np.asarray(df[y_col], dtype=float)
 
-    drops = s[:-1] - s[1:]
-    j = float(np.nanmax(drops))
-    k = int(np.nanargmax(drops))
-    fc_step = int(df_hist["step"].iloc[k])
+    if len(x) < 3:
+        return {
+            "is_abrupt": False,
+            "critical_x": float(x[-1]) if len(x) else float("nan"),
+            "jump": 0.0,
+            "jump_fraction": 0.0,
+        }
 
-    if "nodes_left" in df_hist.columns:
-        n0 = float(df_hist["nodes_left"].iloc[0])
-        n_fc = float(df_hist["nodes_left"].iloc[k])
-        fc_removed = 1.0 - (n_fc / max(1.0, n0))
-    else:
-        fc_removed = np.nan
+    dy = np.diff(y)
+    # largest negative drop
+    idx = int(np.argmin(dy))
+    jump = float(-dy[idx])  # positive magnitude of drop
+    y_span = float(max(1e-12, np.nanmax(y) - np.nanmin(y)))
+    jump_fraction = float(jump / y_span)
 
-    return {"fc_step": fc_step, "jump": j, "fc_removed_frac": float(fc_removed)}
+    critical_x = float(x[idx + 1]) if idx + 1 < len(x) else float(x[-1])
+
+    # "first-order like" heuristic thresholds
+    # jump_fraction >= 0.35 means ~ huge discontinuity relative to range
+    is_abrupt = bool(jump_fraction >= 0.35)
+
+    return {
+        "is_abrupt": is_abrupt,
+        "critical_x": critical_x,
+        "jump": jump,
+        "jump_fraction": jump_fraction,
+    }
