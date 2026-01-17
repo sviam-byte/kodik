@@ -1,358 +1,303 @@
-import os
-import sys
-import numpy as np
-import pandas as pd
 import networkx as nx
 import streamlit as st
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import pandas as pd
+import plotly.graph_objects as go
 
-# Make sure local imports work on Streamlit Cloud
-sys.path.append(os.path.dirname(__file__))
-
-from src.io_load import load_uploaded_bytes
-from src.preprocess import preprocess_fixed_format
-from src.graph_build import build_graph, pick_component
-from src.null_models import build_null
-from src.cache_keys import graph_to_edge_payload, payload_to_graph
-from src.sim import run_attack
-from src.phase import phase_indicators
-from src.plots import plot_compare_runs, plot_lambda2_Q_phase
+from src.io_load import load_uploaded_as_raw, clean_fixed_format
+from src.graph_build import build_graph, filter_edges, connected_components_sorted, lcc_subgraph
+from src.metrics import calculate_metrics
+from src.attacks import run_attack
+from src.null_models import gnm_null_model, configuration_null_model, rewire_mix, copy_weights_from_original
+from src.viz import compute_3d_layout, make_3d_traces, plot_attack_curves
 
 
-# =========================
-# Worker for parallel head-to-head
-# (must be defined BEFORE UI code)
-# =========================
-def _run_attack_worker(edge_payload, attack_kind, remove_frac, steps, seed, eff_k,
-                       rc_frac, rc_min_density, rc_max_frac, heavy_every):
-    import pandas as pd
-    from src.cache_keys import payload_to_graph
-    from src.sim import run_attack
-    from src.phase import phase_indicators
-
-    G = payload_to_graph(edge_payload)
-    df_hist = run_attack(
-        G0=G,
-        attack_kind=attack_kind,
-        remove_frac=remove_frac,
-        steps=steps,
-        seed=seed,
-        eff_k=eff_k,
-        rc_frac=rc_frac,
-        rc_min_density=rc_min_density,
-        rc_max_frac=rc_max_frac,
-        compute_heavy_every=heavy_every,
-    )
-    phi = phase_indicators(df_hist)
-    name = f"head2head|{attack_kind}|seed={seed}"
-    meta = {"attack": attack_kind, **phi}
-    return name, df_hist, meta
-
-
-@st.cache_data(show_spinner=False)
-def load_and_preprocess(file_bytes: bytes, filename: str):
-    df_any = load_uploaded_bytes(file_bytes, filename)
-    df_raw, SRC_COL, DST_COL = preprocess_fixed_format(df_any)
-    return df_raw, SRC_COL, DST_COL
-
-
-@st.cache_data(show_spinner=False)
-def cached_attack(edge_payload, attack_kind, remove_frac, steps, seed, eff_k,
-                  rc_frac, rc_min_density, rc_max_frac, heavy_every):
-    G = payload_to_graph(edge_payload)
-    return run_attack(
-        G0=G,
-        attack_kind=attack_kind,
-        remove_frac=remove_frac,
-        steps=steps,
-        seed=seed,
-        eff_k=eff_k,
-        rc_frac=rc_frac,
-        rc_min_density=rc_min_density,
-        rc_max_frac=rc_max_frac,
-        compute_heavy_every=heavy_every,
-    )
-
-
-# =========================
+# -------------------------
 # Page
-# =========================
+# -------------------------
 st.set_page_config(page_title="прикольчик", layout="wide", page_icon="💀")
 st.title("прикольчик")
 
-# =========================
-# Session state
-# =========================
+
+# -------------------------
+# Session state init
+# -------------------------
 if "experiments" not in st.session_state:
-    st.session_state["experiments"] = []  # list[{"name": str, "df": DataFrame, "meta": dict}]
+    st.session_state["experiments"] = []
 
 
-# =========================
+# -------------------------
 # Upload
-# =========================
+# -------------------------
 with st.sidebar:
     st.header("📎 Данные")
     uploaded = st.file_uploader(
-        "Загрузите файл (CSV или Excel) в текущем формате",
+        "Загрузите CSV/XLSX/XLS (текущий фикс-формат)",
         type=["csv", "xlsx", "xls"],
         accept_multiple_files=False,
     )
     st.caption("Формат: 1=src id, 2=dst id, 9=confidence, 10=weight")
 
 if uploaded is None:
-    st.info("Загрузи CSV/XLSX/XLS, чтобы начать.")
-    st.stop()
-
-df_raw, SRC_COL, DST_COL = load_and_preprocess(uploaded.getvalue(), uploaded.name)
-
-if df_raw.empty:
-    st.error("После очистки данные пустые.")
+    st.info("Загрузи файл, чтобы начать.")
     st.stop()
 
 
-# =========================
+@st.cache_data(show_spinner=False)
+def cached_load(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Cache file load to speed up Streamlit reruns."""
+    return load_uploaded_as_raw(file_bytes, filename)
+
+
+df_any = cached_load(uploaded.getvalue(), uploaded.name)
+
+try:
+    df_raw, meta = clean_fixed_format(df_any)
+except Exception as e:
+    st.error(f"Ошибка формата: {e}")
+    st.stop()
+
+SRC_COL = meta["SRC_COL"]
+DST_COL = meta["DST_COL"]
+
+
+# -------------------------
 # Sidebar controls
-# =========================
+# -------------------------
 with st.sidebar:
-    st.header("🎛️ Фильтры")
+    st.header("🎛️ Калибровка")
 
     max_conf = int(df_raw["confidence"].max()) if len(df_raw) else 0
-    min_conf = st.slider("Порог confidence", 0, max_conf, min(100, max_conf))
+    min_conf = st.slider("Min confidence", 0, max_conf, min(100, max_conf))
 
     max_w = float(df_raw["weight"].max()) if len(df_raw) else 0.0
-    min_weight = st.number_input("Мин. weight", 0.0, max_w, 0.0, step=0.1)
+    min_weight = st.number_input("Min weight", 0.0, max_w, 0.0, step=0.1)
 
     st.write("---")
-    st.header("🔍 Масштаб")
-    mode = st.radio("Режим", ["Глобальный", "Компонента"])
+    mode = st.radio("Масштаб", ["Глобальный", "Локальный (Компонент)"])
 
     st.write("---")
-    st.header("🧪 Null models")
-    graph_kind = st.selectbox(
-        "Граф для эксперимента",
-        ["empirical", "mix_rewire", "rewired_degree", "configuration", "er_gnm"],
-        format_func=lambda x: {
-            "empirical": "Эмпирический",
-            "mix_rewire": "Смешивание (rewire p)",
-            "rewired_degree": "Полный rewire (степени сохранены)",
-            "configuration": "Configuration model",
-            "er_gnm": "ER G(n,m)",
-        }[x],
-    )
-
-    mix_p = 0.0
-    if graph_kind == "mix_rewire":
-        mix_p = st.slider("rewire p", 0.0, 1.0, 0.0, 0.05)
-
-    st.write("---")
-    st.header("⚙️ Настройки")
-    eff_sources_k = st.slider("Efficiency sources k", 8, 256, 64, 8)
+    st.header("⚙️ Вычисления")
     seed = st.number_input("Seed", value=42, step=1)
+    eff_sources_k = st.slider("Efficiency sources k", 8, 256, 64, 8)
 
     st.write("---")
-    st.header("⚡ Скорость")
-    compare_mode = st.radio("Режим атак", ["Single run", "Compare head-to-head"])
-    heavy_every = st.slider("Heavy metrics каждые N шагов", 1, 10, 1, 1)
-    parallel = st.checkbox("Параллельно (только head-to-head)", value=True)
+    st.header("🧪 Нулевые модели / Mix")
+    null_kind = st.selectbox("Null model", ["off", "ER (G(n,m))", "Configuration (deg-preserving)"])
+    mix_p = st.slider("Mix randomness p (rewire)", 0.0, 1.0, 0.0, 0.05)
+    keep_weight_dist = st.checkbox("Assign weights to null-model edges", value=True)
 
 
-# =========================
-# Graph build (filtered empirical -> component -> null model)
-# =========================
-mask = (df_raw["confidence"] >= min_conf) & (df_raw["weight"] >= min_weight)
-df_filtered = df_raw.loc[mask].copy()
+# -------------------------
+# Build graph
+# -------------------------
+@st.cache_data(show_spinner=False)
+def cached_build_graph(df_raw: pd.DataFrame, min_conf: float, min_weight: float, src_col: str, dst_col: str):
+    """Cache filtered graph building to avoid recomputation."""
+    df_f = filter_edges(df_raw, min_conf=min_conf, min_weight=min_weight)
+    G_full = build_graph(df_f, src_col=src_col, dst_col=dst_col)
+    comps = connected_components_sorted(G_full)
+    return G_full, comps
 
-G_full = build_graph(df_filtered, SRC_COL, DST_COL)
 
-comp_id = None
-if mode == "Компонента":
-    comps = sorted(list(nx.connected_components(G_full)), key=len, reverse=True)
-    if comps:
+G_full, comps = cached_build_graph(df_raw, min_conf, min_weight, SRC_COL, DST_COL)
+
+if mode == "Локальный (Компонент)":
+    if len(comps) == 0:
+        G0 = G_full.copy()
+    else:
         with st.sidebar:
             comp_id = st.selectbox(
                 "Компонента",
                 range(len(comps)),
-                format_func=lambda i: f"Cluster {i} (n={len(comps[i])})",
+                format_func=lambda i: f"#{i} n={len(comps[i])}",
             )
+        G0 = G_full.subgraph(comps[comp_id]).copy()
+else:
+    G0 = G_full.copy()
 
-G_emp = pick_component(G_full, comp_id=comp_id if mode == "Компонента" else None)
+G = G0.copy()
 
-if G_emp.number_of_nodes() == 0:
-    st.warning("Граф пустой после фильтров/выбора компоненты.")
-    st.stop()
+if null_kind != "off":
+    if null_kind.startswith("ER"):
+        H = gnm_null_model(G0, seed=int(seed))
+    else:
+        H = configuration_null_model(G0, seed=int(seed))
 
-G_exp = build_null(G_emp, kind=graph_kind, seed=int(seed), mix_p=float(mix_p))
+    if keep_weight_dist:
+        H = copy_weights_from_original(G0, H, seed=int(seed))
+
+    G = H
+
+if mix_p > 0:
+    # mix is applied on the current chosen graph (original or null)
+    G = rewire_mix(G, p=float(mix_p), seed=int(seed), swaps_per_edge=1.0)
 
 
-# =========================
+# -------------------------
+# Base metrics
+# -------------------------
+base = calculate_metrics(G, eff_sources_k=int(eff_sources_k), seed=int(seed))
+
+
+# -------------------------
 # Tabs
-# =========================
-t1, t2 = st.tabs(["💥 ATTACK LAB", "📈 Сравнение/Фазы"])
-
+# -------------------------
+t1, t2, t3, t4, t5 = st.tabs([
+    "📊 Метрики графа",
+    "🧩 Компоненты",
+    "👁️ 3D",
+    "💥 Attack Lab",
+    "🧪 Compare / Experiments",
+])
 
 with t1:
-    st.subheader("Атаки")
-
-    attack_items = [
-        ("random", "Random"),
-        ("strength", "Hubs (strength)"),
-        ("betweenness", "Bridges (betweenness)"),
-        ("kcore", "k-core"),
-        ("richclub_top", "Rich-club (top strength)"),
-        ("richclub_density", "Rich-club (dense)"),
-        ("richclub_seams_top", "Rich-club seams (top)"),
-        ("richclub_seams_density", "Rich-club seams (dense)"),
-        ("stealth", "Stealth (betweenness/strength)"),
-    ]
-
-    attack_kind = st.selectbox(
-        "Стратегия",
-        [k for k, _ in attack_items],
-        format_func=lambda k: dict(attack_items)[k],
-    )
-
-    remove_frac = st.slider("Удалить долю узлов", 0.05, 0.95, 0.50, 0.05)
-    steps = st.slider("Шагов", 5, 120, 30)
-
-    st.write("### Rich-club параметры (используются где надо)")
-    rc_frac = st.slider("RC-A доля", 0.02, 0.50, 0.10, 0.02)
-    rc_min_density = st.slider("RC-B min density", 0.05, 1.00, 0.30, 0.05)
-    rc_max_frac = st.slider("RC-B max frac", 0.05, 0.80, 0.30, 0.05)
-
-    default_name = f"{graph_kind}|{attack_kind}|seed={seed}|p={mix_p:.2f}|conf>={min_conf}|w>={min_weight}"
-    run_name = st.text_input("Имя прогона", value=default_name)
+    st.subheader("Базовые метрики (выбранный граф)")
 
     c1, c2, c3 = st.columns(3)
-    add_run = c1.button("ADD RUN")
-    clear_runs = c2.button("CLEAR RUNS")
+    c1.metric("N", base["N"])
+    c1.metric("E", base["E"])
+    c2.metric("Components", base["C"])
+    c2.metric("β = E-N+C", int(base["beta"]))
+    c3.metric("Efficiency (weighted)", f"{base['eff_w']:.6f}")
+    c3.metric("λmax(Aw)", f"{base['lmax']:.6f}")
 
-    if compare_mode == "Compare head-to-head":
-        run_all = c3.button("RUN ALL (head-to-head)")
+    st.write("---")
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("λ₂ (LCC)", f"{base['l2_lcc']:.10f}")
+    c4.metric("τ(LCC)=1/λ₂", f"{base['tau_lcc']:.3f}" if base["tau_lcc"] < 1e18 else "inf")
+
+    c5.metric("λ₂ (global)", f"{base['l2_global']:.10f}")
+    c5.metric("SIS threshold ~ 1/λmax", f"{base['thresh_SIS']:.6f}")
+
+    c6.metric("Weighted clustering", f"{base['clust_w']:.6f}")
+    c6.metric("Strength assortativity", f"{base['assort_strength']:.6f}")
+
+    st.write("---")
+    c7, c8 = st.columns(2)
+    c7.metric("Entropy H(strength)", f"{base['H_strength']:.6f}")
+    c8.metric("Von Neumann entropy (Laplacian)", f"{base['S_vn_laplacian']:.6f}")
+
+    with st.expander("Что всё это значит (коротко)"):
+        st.markdown(
+            """
+- **λ₂ (algebraic connectivity)** — насколько “жёстко склеен” граф: падает → сеть легче разваливается на куски.
+- **Modularity Q** (будет считаться в атаках) — насколько сеть распадается на модули/сообщества.
+- **β = E-N+C** — число независимых циклов (приближённо “резервных путей”).
+- **Efficiency** — интеграция: насколько короткие маршруты по сети.
+- **Entropy** — грубо “насколько неравномерно распределена нагрузка/связность”.
+- **Von Neumann entropy** — спектральная “сложность” через лапласиан.
+"""
+        )
+
+with t2:
+    st.subheader("Компоненты")
+    if G.number_of_nodes() == 0:
+        st.info("Пустой граф.")
     else:
-        run_all = None
+        comps2 = connected_components_sorted(G)
+        sizes = [len(c) for c in comps2]
+        st.write(f"Всего компонент: {len(comps2)}")
+        st.write(f"Топ-10 размеров: {sizes[:10]}")
 
-    if clear_runs:
-        st.session_state["experiments"] = []
-        st.success("Runs очищены.")
+        H = lcc_subgraph(G)
+        st.write(f"LCC: n={H.number_of_nodes()} e={H.number_of_edges()} connected={nx.is_connected(H)}")
 
-    # Single add run
-    if add_run:
-        edge_payload = graph_to_edge_payload(G_exp)
-        df_hist = cached_attack(
-            edge_payload=edge_payload,
+with t3:
+    st.subheader("3D проекция (цвет = strength)")
+    if G.number_of_nodes() == 0:
+        st.info("Пустой граф.")
+    else:
+        pos3d = compute_3d_layout(G, seed=int(seed))
+        e, n = make_3d_traces(G, pos3d, show_scale=True)
+        fig = go.Figure(data=[e, n])
+        fig.update_layout(
+            template="plotly_dark",
+            margin=dict(l=0, r=0, b=0, t=0),
+            scene=dict(xaxis_visible=False, yaxis_visible=False, zaxis_visible=False),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+with t4:
+    st.subheader("Attack Lab (single run)")
+
+    c1, c2, c3 = st.columns(3)
+    attack_kind_ui = c1.selectbox(
+        "Attack kind",
+        [
+            "random",
+            "degree (hubs)",
+            "betweenness (bridges)",
+            "kcore",
+            "richclub_top",
+            "richclub_density",
+        ],
+    )
+    remove_frac = c2.slider("Remove fraction", 0.05, 0.95, 0.50, 0.05)
+    steps = c3.slider("Steps", 5, 120, 30)
+
+    eff_k_sim = st.slider("Efficiency k (sim)", 8, 256, int(eff_sources_k), 8)
+    compute_heavy_every = st.slider("Heavy metrics every k steps", 1, 10, 1)
+
+    rc_frac = st.slider("RC top frac", 0.02, 0.50, 0.10, 0.02)
+    rc_min_density = st.slider("RC min density", 0.05, 1.00, 0.30, 0.05)
+    rc_max_frac = st.slider("RC max frac", 0.05, 0.80, 0.30, 0.05)
+
+    if st.button("RUN ATTACK"):
+        attack_kind = attack_kind_ui.split()[0]
+        df = run_attack(
+            G,
             attack_kind=attack_kind,
             remove_frac=float(remove_frac),
             steps=int(steps),
             seed=int(seed),
-            eff_k=int(eff_sources_k),
+            eff_sources_k=int(eff_k_sim),
             rc_frac=float(rc_frac),
             rc_min_density=float(rc_min_density),
             rc_max_frac=float(rc_max_frac),
-            heavy_every=int(heavy_every),
+            compute_heavy_every=int(compute_heavy_every),
         )
 
-        phi = phase_indicators(df_hist)
-        meta = {
-            "graph_kind": graph_kind,
-            "mix_p": float(mix_p),
-            "attack": attack_kind,
-            "min_conf": int(min_conf),
-            "min_weight": float(min_weight),
-            **phi,
-        }
-
-        st.session_state["experiments"].append({"name": run_name, "df": df_hist, "meta": meta})
-        st.success(f"Добавлен прогон: {run_name} | jump={meta['jump']:.3f} | fc_removed≈{meta['fc_removed_frac']:.3f}")
-
-    # Head-to-head
-    if run_all:
-        scenarios = ["random", "strength", "betweenness", "kcore", "richclub_top", "richclub_seams_top", "stealth"]
-        edge_payload = graph_to_edge_payload(G_exp)
-
-        if parallel:
-            jobs = []
-            with ProcessPoolExecutor(max_workers=min(7, os.cpu_count() or 4)) as ex:
-                for ak in scenarios:
-                    jobs.append(ex.submit(
-                        _run_attack_worker,
-                        edge_payload,
-                        ak,
-                        float(remove_frac),
-                        int(steps),
-                        int(seed),
-                        int(eff_sources_k),
-                        float(rc_frac),
-                        float(rc_min_density),
-                        float(rc_max_frac),
-                        int(heavy_every),
-                    ))
-
-                for fut in as_completed(jobs):
-                    name, df_hist, meta = fut.result()
-                    full_name = f"{graph_kind}|{name}|p={mix_p:.2f}|conf>={min_conf}|w>={min_weight}"
-                    meta = {
-                        "graph_kind": graph_kind,
-                        "mix_p": float(mix_p),
-                        "min_conf": int(min_conf),
-                        "min_weight": float(min_weight),
-                        **meta,
-                    }
-                    st.session_state["experiments"].append({"name": full_name, "df": df_hist, "meta": meta})
-
-            st.success("Head-to-head готов.")
+        if df.empty:
+            st.warning("Слишком маленький граф / ничего не посчиталось.")
         else:
-            for ak in scenarios:
-                df_hist = cached_attack(
-                    edge_payload=edge_payload,
-                    attack_kind=ak,
-                    remove_frac=float(remove_frac),
-                    steps=int(steps),
-                    seed=int(seed),
-                    eff_k=int(eff_sources_k),
-                    rc_frac=float(rc_frac),
-                    rc_min_density=float(rc_min_density),
-                    rc_max_frac=float(rc_max_frac),
-                    heavy_every=int(heavy_every),
-                )
-                phi = phase_indicators(df_hist)
-                full_name = f"{graph_kind}|{ak}|seed={seed}|p={mix_p:.2f}|conf>={min_conf}|w>={min_weight}"
-                meta = {
-                    "graph_kind": graph_kind,
-                    "mix_p": float(mix_p),
-                    "attack": ak,
-                    "min_conf": int(min_conf),
-                    "min_weight": float(min_weight),
-                    **phi,
-                }
-                st.session_state["experiments"].append({"name": full_name, "df": df_hist, "meta": meta})
+            phase = df.attrs.get("phase", {})
+            st.success(
+                f"Done. Phase: abrupt={phase.get('is_abrupt')} "
+                f"crit={phase.get('crit_x')} drop={phase.get('max_drop')}"
+            )
 
-            st.success("Head-to-head готов.")
+            exp_name = (
+                f"{attack_kind} | rem={remove_frac:.2f} | steps={steps} "
+                f"| null={null_kind} | mix={mix_p:.2f}"
+            )
+            st.session_state["experiments"].append({"name": exp_name, "df": df})
 
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df["removed_frac"], y=df["lcc_frac"], name="LCC fraction"))
+            if "l2_lcc" in df.columns:
+                fig.add_trace(go.Scatter(x=df["removed_frac"], y=df["l2_lcc"], name="λ₂(LCC)"))
+            if "eff_w" in df.columns:
+                fig.add_trace(go.Scatter(x=df["removed_frac"], y=df["eff_w"], name="Efficiency"))
+            fig.update_layout(template="plotly_dark", title="Single run dynamics", xaxis_title="Removed fraction")
+            st.plotly_chart(fig, use_container_width=True)
 
-with t2:
-    runs = st.session_state["experiments"]
+            st.dataframe(df)
 
-    if not runs:
-        st.info("Нет сохранённых прогонов. Добавь run в ATTACK LAB.")
-        st.stop()
+with t5:
+    st.subheader("Experiments сравнение")
+    exps = st.session_state["experiments"]
 
-    st.subheader("Order parameter: S(f)=|LCC|/N0")
-    st.plotly_chart(plot_compare_runs(runs, "lcc_frac", "S(f) под атакой"), use_container_width=True)
-
-    st.subheader("λ₂(LCC)")
-    st.plotly_chart(plot_compare_runs(runs, "l2_lcc", "λ₂(LCC) под атакой"), use_container_width=True)
-
-    st.subheader("Q(LCC)")
-    st.plotly_chart(plot_compare_runs(runs, "Q_lcc", "Q(LCC) под атакой"), use_container_width=True)
-
-    st.subheader("Phase portrait: λ₂ vs Q (LCC)")
-    st.plotly_chart(plot_lambda2_Q_phase(runs), use_container_width=True)
-
-    st.subheader("Взрывность (jump) и критическая область")
-    for r in runs[-12:]:
-        meta = r.get("meta", {})
-        st.write(
-            f"- **{r['name']}** | "
-            f"jump={meta.get('jump', np.nan):.3f} | "
-            f"fc_removed≈{meta.get('fc_removed_frac', np.nan):.3f}"
+    if not exps:
+        st.info("Пока нет экспериментов. Запусти атаки — они появятся тут.")
+    else:
+        y_key = st.selectbox(
+            "Y metric",
+            ["lcc_frac", "l2_lcc", "eff_w", "lmax", "clust_w", "H_strength", "S_vn_laplacian"],
         )
+        fig = plot_attack_curves(exps, y_key=y_key, title=f"Compare: {y_key}")
+        st.plotly_chart(fig, use_container_width=True)
+
+        if st.button("CLEAR experiments"):
+            st.session_state["experiments"] = []
+            st.success("Cleared.")

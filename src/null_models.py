@@ -1,97 +1,79 @@
 import random
-import numpy as np
 import networkx as nx
 
-def _sample_weight(emp_weights: list[float], rng: random.Random) -> float:
-    if not emp_weights:
-        return 1.0
-    w = float(emp_weights[rng.randrange(0, len(emp_weights))])
-    if not np.isfinite(w) or w <= 0:
-        return 1e-12
-    return w
 
-def make_er_gnm_like(G: nx.Graph, seed: int = 42) -> nx.Graph:
+def gnm_null_model(G: nx.Graph, seed: int) -> nx.Graph:
+    """
+    Erdos-Renyi G(n, m) preserving N and E.
+    """
     n = G.number_of_nodes()
     m = G.number_of_edges()
-    nodes = list(G.nodes())
-    if n == 0:
-        return nx.Graph()
-
     H = nx.gnm_random_graph(n, m, seed=int(seed))
-    mapping = {i: nodes[i] for i in range(n)}
+    # relabel to original node IDs (keep UI consistent)
+    nodes = list(G.nodes())
+    mapping = {i: nodes[i] for i in range(len(nodes))}
     H = nx.relabel_nodes(H, mapping)
+    return H
+
+
+def configuration_null_model(G: nx.Graph, seed: int) -> nx.Graph:
+    """
+    Configuration model preserving degree sequence (topology only).
+    Weighted degree distribution is NOT preserved, only degrees.
+    """
+    degs = [d for _, d in G.degree()]
+    # networkx uses numpy RNG internally; seed is ok
+    M = nx.configuration_model(degs, seed=int(seed))
+    H = nx.Graph(M)  # remove multi-edges by collapsing
+    H.remove_edges_from(nx.selfloop_edges(H))
+
+    # relabel to original IDs
+    nodes = list(G.nodes())
+    mapping = {i: nodes[i] for i in range(len(nodes))}
+    H = nx.relabel_nodes(H, mapping)
+    return H
+
+
+def rewire_mix(G: nx.Graph, p: float, seed: int, swaps_per_edge: float = 0.5) -> nx.Graph:
+    """
+    "Mix original with random" via double-edge swaps.
+    p=0 -> original
+    p=1 -> lots of rewiring
+
+    We do:
+      ns = int(p * swaps_per_edge * E)
+      double_edge_swap preserves degree sequence.
+    """
+    H = G.copy()
+    E = H.number_of_edges()
+    if E < 2:
+        return H
+
+    ns = int(float(p) * float(swaps_per_edge) * float(E))
+    ns = max(0, ns)
+
+    if ns == 0:
+        return H
+
+    # double_edge_swap may fail if graph too constrained -> we allow max_tries
+    nx.double_edge_swap(H, nswap=ns, max_tries=ns * 20, seed=int(seed))
+    return H
+
+
+def copy_weights_from_original(G_orig: nx.Graph, H: nx.Graph, seed: int) -> nx.Graph:
+    """
+    Optional: assign weights to null-model edges by sampling weights from original edge weights.
+    Not "scientifically unique", but keeps weight distribution comparable.
+    """
+    import random
 
     rng = random.Random(int(seed))
-    emp_w = [float(d.get("weight", 1.0)) for _, _, d in G.edges(data=True)]
+    ws = [float(d.get("weight", 1.0)) for _, _, d in G_orig.edges(data=True)]
+    if not ws:
+        return H
 
     for u, v in H.edges():
-        H[u][v]["weight"] = _sample_weight(emp_w, rng)
+        H[u][v]["weight"] = float(rng.choice(ws))
         H[u][v]["confidence"] = 0.0
+
     return H
-
-def make_configuration_like(G: nx.Graph, seed: int = 42, max_tries: int = 30) -> nx.Graph:
-    nodes = list(G.nodes())
-    if not nodes:
-        return nx.Graph()
-
-    deg_seq = [int(G.degree(n)) for n in nodes]
-    emp_w = [float(d.get("weight", 1.0)) for _, _, d in G.edges(data=True)]
-    rng = random.Random(int(seed))
-
-    best = None
-    best_m = -1
-
-    for t in range(max_tries):
-        M = nx.configuration_model(deg_seq, seed=int(seed) + t)
-        H = nx.Graph(M)
-        H.remove_edges_from(nx.selfloop_edges(H))
-
-        mapping = {i: nodes[i] for i in range(len(nodes))}
-        H = nx.relabel_nodes(H, mapping)
-
-        if H.number_of_edges() > best_m:
-            best = H
-            best_m = H.number_of_edges()
-
-        if abs(H.number_of_edges() - G.number_of_edges()) <= max(1, int(0.02 * G.number_of_edges())):
-            break
-
-    if best is None:
-        best = nx.Graph()
-
-    for u, v in best.edges():
-        best[u][v]["weight"] = _sample_weight(emp_w, rng)
-        best[u][v]["confidence"] = 0.0
-
-    return best
-
-def degree_preserving_rewire(G: nx.Graph, p: float, seed: int = 42, tries_scale: int = 20) -> nx.Graph:
-    p = float(np.clip(p, 0.0, 1.0))
-    H = G.copy()
-    m = H.number_of_edges()
-    if m < 2 or H.number_of_nodes() < 4 or p <= 0:
-        return H
-
-    nswap = int(p * m)
-    if nswap <= 0:
-        return H
-    max_tries = max(100, int(tries_scale * nswap))
-
-    try:
-        nx.double_edge_swap(H, nswap=nswap, max_tries=max_tries, seed=int(seed))
-    except TypeError:
-        nx.double_edge_swap(H, nswap=nswap, max_tries=max_tries)
-    return H
-
-def build_null(G_emp: nx.Graph, kind: str, seed: int, mix_p: float = 0.0) -> nx.Graph:
-    if kind == "empirical":
-        return G_emp.copy()
-    if kind == "er_gnm":
-        return make_er_gnm_like(G_emp, seed=seed)
-    if kind == "configuration":
-        return make_configuration_like(G_emp, seed=seed)
-    if kind == "rewired_degree":
-        return degree_preserving_rewire(G_emp, p=1.0, seed=seed)
-    if kind == "mix_rewire":
-        return degree_preserving_rewire(G_emp, p=mix_p, seed=seed)
-    return G_emp.copy()
