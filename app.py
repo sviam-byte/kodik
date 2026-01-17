@@ -1,5 +1,7 @@
 import time
 import uuid
+import hashlib
+
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -31,22 +33,59 @@ from src.session_io import (
 st.set_page_config(page_title="прикольчик", layout="wide", page_icon="💀")
 st.title("прикольчик")
 
+# Sticky topbar CSS
+st.markdown(
+    """
+    <style>
+      /* Make the container that holds .sticky-topbar sticky */
+      div[data-testid="stVerticalBlock"] > div:has(> div.sticky-topbar){
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        background: rgba(15, 17, 22, 0.96);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        padding-top: 0.25rem;
+        padding-bottom: 0.25rem;
+      }
+
+      .sticky-topbar .stButton>button { height: 2.4rem; }
+      .sticky-topbar .stTextInput input { height: 2.4rem; }
+      .sticky-topbar .stSelectbox div[data-baseweb="select"] { min-height: 2.4rem; }
+      .sticky-topbar .stNumberInput input { height: 2.4rem; }
+
+      /* Reduce vertical gaps inside topbar */
+      .sticky-topbar [data-testid="stVerticalBlock"] { gap: 0.25rem; }
+
+      /* Slightly tighter labels */
+      .sticky-topbar label { font-size: 0.85rem; opacity: 0.9; }
+
+      /* Avoid huge top padding under sticky bar */
+      section.main > div { padding-top: 0.5rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # =========================
 # Session State
 # =========================
 def _init_state():
     if "graphs" not in st.session_state:
-        st.session_state["graphs"] = {}  # gid -> {id,name,source,tags,edges,created_at}
+        # gid -> {id,name,source,tags,edges,created_at}
+        st.session_state["graphs"] = {}
+
     if "experiments" not in st.session_state:
-        st.session_state["experiments"] = []  # list[{id,name,graph_id,...}]
+        st.session_state["experiments"] = []
+
     if "active_graph_id" not in st.session_state:
         st.session_state["active_graph_id"] = None
-    if "last_upload_name" not in st.session_state:
-        st.session_state["last_upload_name"] = None
-    if "mix_p_by_gid" not in st.session_state:
-        st.session_state["mix_p_by_gid"] = {}  # base_gid -> current p
+
     if "seed_top" not in st.session_state:
         st.session_state["seed_top"] = 42
+
+    if "last_uploaded_fingerprint" not in st.session_state:
+        st.session_state["last_uploaded_fingerprint"] = None
 
 
 _init_state()
@@ -60,12 +99,11 @@ def new_id(prefix: str) -> str:
 
 def add_graph_to_workspace(name: str, df_edges: pd.DataFrame, source: str, tags: dict | None = None) -> str:
     gid = new_id("G")
-    tags = tags or {}
     st.session_state["graphs"][gid] = {
         "id": gid,
         "name": name,
         "source": source,
-        "tags": tags,  # expects {"src_col":..., "dst_col":...}
+        "tags": tags or {},  # expects {"src_col":..., "dst_col":...}
         "edges": df_edges.copy(),
         "created_at": time.time(),
     }
@@ -78,6 +116,11 @@ def get_active_graph_entry():
     if gid is None:
         return None
     return st.session_state["graphs"].get(gid)
+
+
+def sorted_graph_ids():
+    graphs = st.session_state["graphs"]
+    return sorted(list(graphs.keys()), key=lambda k: graphs[k].get("created_at", 0.0))
 
 
 def build_active_graph(min_conf: int, min_weight: float):
@@ -116,167 +159,233 @@ def push_experiment(name: str, graph_id: str, attack_kind: str, params: dict, df
     return exp_id
 
 
-# IMPORTANT:
-# Do NOT access a global `meta` at import time.
-# File parsing produces `meta` only AFTER upload.
-# We store src/dst col names in graph["tags"] (lowercase keys).
+def fingerprint_upload(uploaded) -> str:
+    b = uploaded.getvalue()
+    return hashlib.md5(b).hexdigest() + f":{uploaded.name}:{len(b)}"
 
 
 # =========================
-# Top Graph Panel (tabs-like) + generator + mix
+# Sticky Topbar
 # =========================
-def _sorted_graph_ids():
+def render_sticky_topbar():
     graphs = st.session_state["graphs"]
-    return sorted(list(graphs.keys()), key=lambda k: graphs[k].get("created_at", 0.0))
+    gids = sorted_graph_ids()
 
+    with st.container():
+        st.markdown('<div class="sticky-topbar">', unsafe_allow_html=True)
 
-def render_top_graph_panel():
-    graphs = st.session_state["graphs"]
-    if not graphs:
-        st.info("Workspace пустой: загрузите CSV/Excel в sidebar или создайте null-graph ниже.")
-        return None
-
-    gids = _sorted_graph_ids()
-    if st.session_state["active_graph_id"] not in graphs:
-        st.session_state["active_graph_id"] = gids[0]
-
-    active_gid = st.session_state["active_graph_id"]
-
-    # --- "Tabs" row (radio horizontal)
-    # If too many graphs, fallback to selectbox to avoid UI overflow.
-    MAX_TABS = 10
-    row1, row2 = st.columns([3.2, 2.8])
-
-    with row1:
-        if len(gids) <= MAX_TABS:
-            labels = [graphs[gid]["name"] for gid in gids]
-            idx = gids.index(active_gid)
-            picked_label = st.radio(
-                "Графы",
-                options=list(range(len(gids))),
-                index=idx,
-                horizontal=True,
-                format_func=lambda i: labels[i],
-                key="top_graph_tabs_radio",
-            )
-            picked_gid = gids[int(picked_label)]
-        else:
-            picked_gid = st.selectbox(
-                "Граф",
-                options=gids,
-                index=gids.index(active_gid),
-                format_func=lambda gid: f"{graphs[gid]['name']} · ({graphs[gid]['source']})",
-                key="top_graph_selectbox",
-            )
-
-        if picked_gid != active_gid:
-            st.session_state["active_graph_id"] = picked_gid
-            st.rerun()
-
-    entry = graphs[st.session_state["active_graph_id"]]
-    df_edges_base = entry["edges"]
-    src_col = entry["tags"].get("src_col", df_edges_base.columns[0])
-    dst_col = entry["tags"].get("dst_col", df_edges_base.columns[1])
-    G_base_full = build_graph_from_edges(df_edges_base, src_col=src_col, dst_col=dst_col)
-    N0 = G_base_full.number_of_nodes()
-    E0 = G_base_full.number_of_edges()
-
-    with row2:
-        st.caption(f"Активный: {entry['name']} · source={entry['source']} · N={N0} E={E0}")
-
-        # Rename (tab label = graph name)
-        r1, r2 = st.columns([2.2, 1.0])
-        with r1:
-            new_name = st.text_input(
-                "Переименовать вкладку",
-                value=entry["name"],
-                key="top_rename_input",
-                label_visibility="collapsed",
-                placeholder="Имя вкладки/графа",
-            )
-        with r2:
-            if st.button("Rename", use_container_width=True):
-                new_name = (new_name or "").strip()
-                if new_name:
-                    st.session_state["graphs"][entry["id"]]["name"] = new_name
+        # If empty, show only generator (manual ER possible), but we still need src/dst column names.
+        # So: if no graphs exist yet, allow creating a "fresh ER" with synthetic columns.
+        if not gids:
+            r1, r2, r3, r4, r5, r6 = st.columns([2.0, 1.0, 1.0, 1.3, 1.3, 1.4])
+            with r1:
+                st.warning("Workspace пустой.")
+            with r2:
+                seed = st.number_input("Seed", value=int(st.session_state["seed_top"]), step=1, key="top_seed_empty")
+                st.session_state["seed_top"] = int(seed)
+            with r3:
+                n_val = st.number_input("N", min_value=2, value=200, step=1, key="top_n_empty")
+            with r4:
+                m_val = st.number_input("M", min_value=1, value=600, step=1, key="top_m_empty")
+            with r5:
+                name = st.text_input("Имя", value="случайный граф", key="top_name_empty", label_visibility="collapsed")
+            with r6:
+                if st.button("Generate ER", key="top_gen_er_empty", use_container_width=True):
+                    G_new = make_er_gnm(int(n_val), int(m_val), seed=int(seed))
+                    edges = [[u, v, 1.0, 1.0] for u, v in G_new.edges()]
+                    df_new = pd.DataFrame(edges, columns=["src", "dst", "weight", "confidence"])
+                    add_graph_to_workspace(
+                        name=(name or "").strip() or f"ER(n={int(n_val)},m={int(m_val)},seed={seed})",
+                        df_edges=df_new,
+                        source="null:ER",
+                        tags={"src_col": "src", "dst_col": "dst"},
+                    )
                     st.rerun()
 
-    # --- Generator + mix row
-    gen1, gen2, gen3, gen4 = st.columns([1.2, 1.2, 1.6, 2.0])
+            st.markdown("</div>", unsafe_allow_html=True)
+            return None
 
-    with gen1:
-        seed = st.number_input("Seed", value=int(st.session_state["seed_top"]), step=1, key="seed_top_input")
-        st.session_state["seed_top"] = int(seed)
+        # Ensure active exists
+        if st.session_state["active_graph_id"] not in graphs:
+            st.session_state["active_graph_id"] = gids[0]
 
-    with gen2:
-        if st.button("➕ ER(n,m)", use_container_width=True):
-            G_null = make_er_gnm(N0, E0, seed=int(seed))
-            edges = [[u, v, 1.0, 1.0] for u, v in G_null.edges()]
-            df_new = pd.DataFrame(edges, columns=[src_col, dst_col, "weight", "confidence"])
-            add_graph_to_workspace(
-                name=f"ER(n={N0},m={E0},seed={seed})",
-                df_edges=df_new,
-                source="null:ER",
-                tags={"src_col": src_col, "dst_col": dst_col},
-            )
-            st.rerun()
+        active_gid = st.session_state["active_graph_id"]
+        active_entry = graphs[active_gid]
 
-    with gen3:
-        c1, c2 = st.columns(2)
+        # Row 1: switch / rename / delete
+        c1, c2, c3, c4 = st.columns([2.6, 2.2, 1.1, 1.1])
+
         with c1:
-            if st.button("➕ CFG(deg)", use_container_width=True):
-                G_null = make_configuration_model(G_base_full, seed=int(seed))
-                edges = [[u, v, 1.0, 1.0] for u, v in G_null.edges()]
-                df_new = pd.DataFrame(edges, columns=[src_col, dst_col, "weight", "confidence"])
-                add_graph_to_workspace(
-                    name=f"CFG(deg,seed={seed})",
-                    df_edges=df_new,
-                    source="null:CFG",
-                    tags={"src_col": src_col, "dst_col": dst_col},
-                )
+            picked = st.selectbox(
+                "Активный граф",
+                options=gids,
+                index=gids.index(active_gid),
+                format_func=lambda gid: graphs[gid]["name"],
+                key="top_active_graph",
+                label_visibility="collapsed",
+            )
+            if picked != active_gid:
+                st.session_state["active_graph_id"] = picked
                 st.rerun()
+
         with c2:
-            if st.button("📎 Copy", use_container_width=True):
+            new_name = st.text_input(
+                "Имя вкладки",
+                value=active_entry["name"],
+                key="top_rename",
+                label_visibility="collapsed",
+                placeholder="переименовать",
+            )
+
+        with c3:
+            if st.button("Rename", key="top_rename_btn", use_container_width=True):
+                nn = (new_name or "").strip()
+                if nn:
+                    st.session_state["graphs"][active_gid]["name"] = nn
+                    st.rerun()
+
+        with c4:
+            if st.button("Delete", key="top_delete_btn", use_container_width=True):
+                st.session_state["graphs"].pop(active_gid, None)
+                st.session_state["experiments"] = [e for e in st.session_state["experiments"] if e.get("graph_id") != active_gid]
+                gids2 = sorted_graph_ids()
+                st.session_state["active_graph_id"] = gids2[0] if gids2 else None
+                st.rerun()
+
+        # Compute base graph stats for "based on active" mode
+        active_entry = st.session_state["graphs"][st.session_state["active_graph_id"]]
+        df_base = active_entry["edges"]
+        src_col = active_entry["tags"].get("src_col", df_base.columns[0])
+        dst_col = active_entry["tags"].get("dst_col", df_base.columns[1])
+        G_base_full = build_graph_from_edges(df_base, src_col=src_col, dst_col=dst_col)
+        N0, E0 = G_base_full.number_of_nodes(), G_base_full.number_of_edges()
+
+        # Row 2: generator controls
+        g1, g2, g3, g4, g5, g6 = st.columns([1.0, 1.6, 1.0, 1.0, 1.6, 1.2])
+
+        with g1:
+            seed = st.number_input(
+                "Seed",
+                value=int(st.session_state.get("seed_top", 42)),
+                step=1,
+                key="top_seed",
+                label_visibility="collapsed",
+            )
+            st.session_state["seed_top"] = int(seed)
+
+        with g2:
+            gen_mode = st.selectbox(
+                "Режим",
+                ["На основе активного (N,E)", "Задать N и M вручную"],
+                key="top_gen_mode",
+                label_visibility="collapsed",
+            )
+
+        if gen_mode.startswith("На основе"):
+            n_val, m_val = N0, E0
+            with g3:
+                st.number_input("N", value=int(n_val), disabled=True, key="top_n_disabled", label_visibility="collapsed")
+            with g4:
+                st.number_input("M", value=int(m_val), disabled=True, key="top_m_disabled", label_visibility="collapsed")
+        else:
+            with g3:
+                n_val = st.number_input("N", min_value=2, value=max(2, int(N0) if N0 else 200), step=1, key="top_n")
+            with g4:
+                m_val = st.number_input("M", min_value=1, value=max(1, int(E0) if E0 else 600), step=1, key="top_m")
+
+        with g5:
+            gen_type = st.selectbox(
+                "Тип",
+                ["ER G(n,m)", "CFG (от активного)", "Mix/Rewire p (от активного)"],
+                key="top_gen_type",
+                label_visibility="collapsed",
+            )
+
+        with g6:
+            new_graph_name = st.text_input(
+                "Имя нового",
+                value="",
+                key="top_new_name",
+                label_visibility="collapsed",
+                placeholder="например: случайный граф",
+            )
+
+        # Row 3: action buttons + optional p
+        a1, a2, a3, a4 = st.columns([1.4, 1.0, 1.0, 1.6])
+
+        with a1:
+            st.caption(f"Активный: N={N0} E={E0}")
+
+        with a2:
+            if st.button("Copy", key="top_copy_btn", use_container_width=True):
                 add_graph_to_workspace(
-                    name=f"copy:{entry['name']}",
-                    df_edges=entry["edges"],
+                    name=f"copy:{active_entry['name']}",
+                    df_edges=active_entry["edges"],
                     source="copy",
-                    tags=entry["tags"],
+                    tags=active_entry["tags"],
                 )
                 st.rerun()
 
-    with gen4:
-        base_gid = entry["id"]
-        p_now = float(st.session_state["mix_p_by_gid"].get(base_gid, 0.0))
-        p_step = st.slider("Постепенная рандомизация Δp", 0.01, 0.50, 0.05, 0.01, key="mix_p_step_top")
-        st.caption(f"Текущий p для этой базы: {p_now:.2f}")
-
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("Step mix", use_container_width=True):
-                p_new = min(1.0, p_now + float(p_step))
-                st.session_state["mix_p_by_gid"][base_gid] = p_new
-                G_mix = rewire_mix(G_base_full, p=float(p_new), seed=int(seed))
-                edges = [[u, v, 1.0, 1.0] for u, v in G_mix.edges()]
-                df_new = pd.DataFrame(edges, columns=[src_col, dst_col, "weight", "confidence"])
-                add_graph_to_workspace(
-                    name=f"MIX(p={p_new:.2f},seed={seed}) from {entry['name']}",
-                    df_edges=df_new,
-                    source="mix:rewire",
-                    tags={"src_col": src_col, "dst_col": dst_col},
-                )
-                st.rerun()
-        with b2:
-            if st.button("Reset p", use_container_width=True):
-                st.session_state["mix_p_by_gid"][base_gid] = 0.0
+        with a3:
+            # Delete all experiments for active graph quickly
+            if st.button("Clear exp", key="top_clear_exp_btn", use_container_width=True):
+                gid = st.session_state["active_graph_id"]
+                st.session_state["experiments"] = [e for e in st.session_state["experiments"] if e.get("graph_id") != gid]
                 st.rerun()
 
-    st.write("---")
+        with a4:
+            if gen_type == "Mix/Rewire p (от активного)":
+                p = st.slider("p", 0.0, 1.0, 0.2, 0.05, key="top_mix_p")
+            else:
+                p = None
+
+            if st.button("Generate", key="top_generate_btn", use_container_width=True):
+                nm = (new_graph_name or "").strip()
+
+                if gen_type == "ER G(n,m)":
+                    G_new = make_er_gnm(int(n_val), int(m_val), seed=int(seed))
+                    edges = [[u, v, 1.0, 1.0] for u, v in G_new.edges()]
+                    df_new = pd.DataFrame(edges, columns=[src_col, dst_col, "weight", "confidence"])
+                    add_graph_to_workspace(
+                        name=nm or f"ER(n={int(n_val)},m={int(m_val)},seed={seed})",
+                        df_edges=df_new,
+                        source="null:ER",
+                        tags={"src_col": src_col, "dst_col": dst_col},
+                    )
+                    st.rerun()
+
+                elif gen_type == "CFG (от активного)":
+                    G_new = make_configuration_model(G_base_full, seed=int(seed))
+                    edges = [[u, v, 1.0, 1.0] for u, v in G_new.edges()]
+                    df_new = pd.DataFrame(edges, columns=[src_col, dst_col, "weight", "confidence"])
+                    add_graph_to_workspace(
+                        name=nm or f"CFG(deg,seed={seed}) from {active_entry['name']}",
+                        df_edges=df_new,
+                        source="null:CFG",
+                        tags={"src_col": src_col, "dst_col": dst_col},
+                    )
+                    st.rerun()
+
+                else:
+                    p_val = float(p if p is not None else 0.2)
+                    G_new = rewire_mix(G_base_full, p=p_val, seed=int(seed))
+                    edges = [[u, v, 1.0, 1.0] for u, v in G_new.edges()]
+                    df_new = pd.DataFrame(edges, columns=[src_col, dst_col, "weight", "confidence"])
+                    add_graph_to_workspace(
+                        name=nm or f"MIX(p={p_val:.2f},seed={seed}) from {active_entry['name']}",
+                        df_edges=df_new,
+                        source="mix:rewire",
+                        tags={"src_col": src_col, "dst_col": dst_col},
+                    )
+                    st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
     return st.session_state["active_graph_id"]
 
 
 # =========================
-# Sidebar: Workspace I/O + Upload + Analysis controls
+# Sidebar
 # =========================
 with st.sidebar:
     st.header("🧠 Workspace")
@@ -287,7 +396,7 @@ with st.sidebar:
         if c1.button("Export workspace"):
             blob = export_workspace_json(st.session_state["graphs"], st.session_state["experiments"])
             st.download_button(
-                "⬇️ скачать workspace.json",
+                "⬇️ workspace.json",
                 data=blob,
                 file_name="workspace.json",
                 mime="application/json",
@@ -297,7 +406,7 @@ with st.sidebar:
         if c2.button("Export experiments"):
             blob = export_experiments_json(st.session_state["experiments"])
             st.download_button(
-                "⬇️ скачать experiments.json",
+                "⬇️ experiments.json",
                 data=blob,
                 file_name="experiments.json",
                 mime="application/json",
@@ -310,9 +419,10 @@ with st.sidebar:
                 graphs_new, exps_new = import_workspace_json(up_ws.getvalue())
                 st.session_state["graphs"] = graphs_new
                 st.session_state["experiments"] = exps_new
-                gids = _sorted_graph_ids()
+                gids = sorted_graph_ids()
                 st.session_state["active_graph_id"] = gids[0] if gids else None
                 st.success("Workspace импортирован.")
+                st.rerun()
             except Exception as e:
                 st.error(f"Ошибка импорта workspace: {e}")
 
@@ -322,73 +432,80 @@ with st.sidebar:
                 exps_add = import_experiments_json(up_exps.getvalue())
                 st.session_state["experiments"].extend(exps_add)
                 st.success("Experiments импортированы (добавлены).")
+                st.rerun()
             except Exception as e:
                 st.error(f"Ошибка импорта experiments: {e}")
 
     st.write("---")
-    st.header("📎 Добавить граф")
+    st.header("📎 Upload графа")
 
     uploaded = st.file_uploader(
-        "Загрузите CSV/Excel (фикс. формат)",
+        "CSV/Excel (фикс. формат)",
         type=["csv", "xlsx", "xls"],
         accept_multiple_files=False,
         key="file_uploader_main",
     )
-    st.caption("Ожидается: 1-я колонка=source id, 2-я=target id, 9-я=confidence, 10-я=weight.")
+    st.caption("Ожидается: 1-я=source id, 2-я=target id, 9-я=confidence, 10-я=weight.")
 
+    # Guard against duplicates on rerun:
     if uploaded is not None:
-        try:
-            df_any = load_uploaded_any(uploaded.getvalue(), uploaded.name)
-            df_edges, meta = coerce_fixed_format(df_any)  # meta={"src_col":..., "dst_col":...}
-            add_graph_to_workspace(
-                name=f"uploaded:{uploaded.name}",
-                df_edges=df_edges,
-                source="upload",
-                tags=meta,
-            )
-            st.session_state["last_upload_name"] = uploaded.name
-            st.success(f"Добавлен граф: uploaded:{uploaded.name}")
-        except Exception as e:
-            st.error(f"Ошибка загрузки/парсинга: {e}")
+        fp = fingerprint_upload(uploaded)
+        if fp != st.session_state["last_uploaded_fingerprint"]:
+            try:
+                df_any = load_uploaded_any(uploaded.getvalue(), uploaded.name)
+                df_edges, meta = coerce_fixed_format(df_any)  # meta={"src_col":..., "dst_col":...}
+                add_graph_to_workspace(
+                    name=f"uploaded:{uploaded.name}",
+                    df_edges=df_edges,
+                    source="upload",
+                    tags=meta,
+                )
+                st.session_state["last_uploaded_fingerprint"] = fp
+                st.success(f"Добавлен: uploaded:{uploaded.name}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка загрузки/парсинга: {e}")
+        else:
+            st.caption("Этот файл уже добавлен (не дублирую).")
 
     st.write("---")
-    st.header("🎛️ Анализ")
+    st.header("🎛️ Параметры анализа")
 
-    # Controls can be set even if no graphs; the main area will stop gracefully.
-    min_conf = st.number_input("Порог confidence (>=)", value=0, step=1)
-    min_weight = st.number_input("Мин. вес weight (>=)", value=0.0, step=0.1)
-    eff_sources_k = st.slider("Efficiency k (аппрокс)", 8, 256, 64, 8)
-    seed_analysis = st.number_input("Seed (анализ/3D/метрики)", value=42, step=1)
+    min_conf = st.number_input("confidence ≥", value=0, step=1)
+    min_weight = st.number_input("weight ≥", value=0.0, step=0.1)
+    eff_sources_k = st.slider("Efficiency k", 8, 256, 64, 8)
+    seed_analysis = st.number_input("Seed (анализ/3D)", value=42, step=1)
 
     st.write("---")
     st.header("🧹 Очистка")
     cc1, cc2 = st.columns(2)
     with cc1:
-        if st.button("Очистить experiments", use_container_width=True):
+        if st.button("Clear experiments", use_container_width=True):
             st.session_state["experiments"] = []
-            st.success("Experiments очищены.")
+            st.rerun()
     with cc2:
-        if st.button("Очистить всё", use_container_width=True):
+        if st.button("Clear ALL", use_container_width=True):
             st.session_state["graphs"] = {}
             st.session_state["experiments"] = []
             st.session_state["active_graph_id"] = None
-            st.session_state["mix_p_by_gid"] = {}
-            st.success("Workspace очищен.")
-
+            st.session_state["last_uploaded_fingerprint"] = None
+            st.rerun()
 
 # =========================
-# Top panel: graph switching + generation
+# Sticky Topbar (always renders)
 # =========================
-active_gid = render_top_graph_panel()
-if active_gid is None:
+render_sticky_topbar()
+
+# =========================
+# Main: need an active graph to proceed
+# =========================
+entry = get_active_graph_entry()
+if entry is None:
     st.stop()
 
-graph_entry = get_active_graph_entry()
-graph_id = graph_entry["id"]
+graph_id = entry["id"]
 
-# =========================
-# Build Active Graph (filtered) + optional LCC view
-# =========================
+# Build filtered graph
 G, ctx = build_active_graph(min_conf=int(min_conf), min_weight=float(min_weight))
 if G is None:
     st.stop()
@@ -396,18 +513,16 @@ if G is None:
 mode = st.radio("Масштаб", ["Глобальный (весь граф)", "LCC (гигантская компонента)"], horizontal=True)
 G_view = lcc_subgraph(G) if mode.startswith("LCC") else G
 
-# =========================
-# Quick summary row
-# =========================
-top1, top2, top3, top4 = st.columns([2.3, 1.2, 1.2, 1.3])
-with top1:
-    st.subheader(f"Активный граф: {graph_entry['name']}")
-    st.caption(f"source={graph_entry['source']} · graph_id={graph_id} · фильтры: conf>={min_conf}, w>={min_weight}")
-with top2:
+# Quick summary
+s1, s2, s3, s4 = st.columns([2.6, 1.1, 1.1, 1.2])
+with s1:
+    st.subheader(f"Активный граф: {entry['name']}")
+    st.caption(f"source={entry['source']} · id={graph_id} · фильтры: conf≥{min_conf}, w≥{min_weight}")
+with s2:
     st.metric("Nodes", int(G_view.number_of_nodes()))
-with top3:
+with s3:
     st.metric("Edges", int(G_view.number_of_edges()))
-with top4:
+with s4:
     st.metric("Components", int(nx.number_connected_components(G_view)) if G_view.number_of_nodes() else 0)
 
 base = calculate_metrics(G_view, eff_sources_k=int(eff_sources_k), seed=int(seed_analysis))
@@ -416,18 +531,9 @@ base = calculate_metrics(G_view, eff_sources_k=int(eff_sources_k), seed=int(seed
 # Tabs
 # =========================
 t1, t2, t3, t4, t5 = st.tabs(
-    [
-        "📊 База (метрики)",
-        "🧬 Спектр + сложность",
-        "👁️ 3D",
-        "💥 ATTACK LAB",
-        "🆚 Сравнение",
-    ]
+    ["📊 База", "🧬 Спектр+сложность", "👁️ 3D", "💥 ATTACK LAB", "🆚 Сравнение"]
 )
 
-# -------------------------
-# Tab 1: metrics
-# -------------------------
 with t1:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("N", base["N"])
@@ -460,43 +566,33 @@ with t1:
     st.subheader("Сводка")
     st.code(graph_summary(G_view), language="text")
 
-# -------------------------
-# Tab 2: spectrum/complexity text
-# -------------------------
 with t2:
     left, right = st.columns([1.2, 1.0])
-
     with left:
-        st.subheader("λ₂ / Q интерпретация")
+        st.subheader("λ₂ / Q")
         st.write(f"- λ₂ (LCC) = {base['l2_lcc']:.6g}")
         st.write(f"- Q (Louvain) = {base['mod']:.6g}")
         st.markdown(
-            "**Эвристика:**\n"
             "- λ₂ низкая → сеть легко рассоединяется\n"
             "- Q высокая → сильная модульность\n"
-            "- Q низкая → нет выраженных сообществ\n"
+            "- Q низкая → размытая структура\n"
         )
-
     with right:
-        st.subheader("Сложность / структура")
+        st.subheader("Структура")
         st.write(f"- Degree-entropy H = {base['entropy_deg']:.6g}")
         st.write(f"- Assortativity r = {base['assortativity']:.6g}")
         st.write(f"- Clustering C̄ = {base['clustering']:.6g}")
-        st.write(f"- Diameter (LCC, approx) = {base['diameter_approx']}")
+        st.write(f"- Diameter (approx) = {base['diameter_approx']}")
 
     st.write("---")
-    with st.expander("Диагностика (почему λ₂ может быть 0)", expanded=False):
+    with st.expander("Диагностика (если λ₂=0/NaN)", expanded=False):
         st.write(f"N={base['N']} E={base['E']} C={base['C']}")
         H = lcc_subgraph(G_view)
         st.write(
-            "LCC: "
-            f"n={H.number_of_nodes()} e={H.number_of_edges()} "
+            f"LCC: n={H.number_of_nodes()} e={H.number_of_edges()} "
             f"connected={nx.is_connected(H) if H.number_of_nodes() else False}"
         )
 
-# -------------------------
-# Tab 3: 3D
-# -------------------------
 with t3:
     st.subheader("3D Projection")
     if G_view.number_of_nodes() == 0:
@@ -512,16 +608,12 @@ with t3:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-# -------------------------
-# Tab 4: Attack Lab
-# -------------------------
 with t4:
     st.subheader("💥 Лаборатория разрушения")
-    st.caption("Эксперименты сохраняются в Workspace → можно сравнивать на вкладке 🆚.")
+    st.caption("Результаты сохраняются в Workspace → вкладка 🆚.")
 
     with st.expander("Настройки симуляции", expanded=True):
         a1, a2, a3, a4 = st.columns(4)
-
         attack_kind_ui = a1.selectbox(
             "Вектор атаки",
             [
@@ -541,8 +633,8 @@ with t4:
         b1, b2, b3, b4 = st.columns(4)
         eff_k_sim = b1.slider("Efficiency k (sim)", 8, 256, int(eff_sources_k), 8)
         compute_heavy_every = b2.slider("Heavy metrics every k steps", 1, 10, 1, 1)
-        keep_states_3d = b3.checkbox("Хранить states для 3D replay", value=False)
-        name_tag = b4.text_input("Название эксперимента (tag)", value="")
+        keep_states_3d = b3.checkbox("Хранить states (replay)", value=False)
+        name_tag = b4.text_input("Тег эксперимента", value="")
 
         rc_frac = 0.10
         rc_min_density = 0.30
@@ -568,17 +660,17 @@ with t4:
         attack_kind = "random"
 
     run_col1, run_col2 = st.columns(2)
-    run_one = run_col1.button("▶️ Запустить (1 сценарий)", use_container_width=True)
-    run_all = run_col2.button("⚔️ Head-to-head (4 атаки)", use_container_width=True)
+    run_one = run_col1.button("▶️ Запустить (1)", use_container_width=True)
+    run_all = run_col2.button("⚔️ Head-to-head (4)", use_container_width=True)
 
-    def _run_and_render(attack_kind_local: str, title_prefix: str):
+    def _run_and_render(kind: str, title_prefix: str):
         if G_view.number_of_nodes() < 2:
             st.warning("Граф слишком маленький.")
             return None
 
         df_hist, _states = run_attack(
             G_view,
-            attack_kind=attack_kind_local,
+            attack_kind=kind,
             remove_frac=float(remove_frac),
             steps=int(steps),
             seed=int(attack_seed),
@@ -593,13 +685,13 @@ with t4:
         phase = classify_phase_transition(df_hist, x_col="removed_frac", y_col="lcc_frac")
 
         label = title_prefix
-        if name_tag.strip():
+        if (name_tag or "").strip():
             label += f" · {name_tag.strip()}"
 
         push_experiment(
             name=label,
             graph_id=graph_id,
-            attack_kind=attack_kind_local,
+            attack_kind=kind,
             params={
                 "remove_frac": float(remove_frac),
                 "steps": int(steps),
@@ -610,23 +702,21 @@ with t4:
                 "rc_min_density": float(rc_min_density),
                 "rc_max_frac": float(rc_max_frac),
                 "mode": mode,
-                "active_graph_name": graph_entry["name"],
+                "active_graph_name": entry["name"],
                 "phase": phase,
             },
             df_hist=df_hist,
         )
 
         st.success(f"Готово: {label}")
-        st.caption(
-            f"Phase: abrupt={phase['is_abrupt']} · critical~{phase['critical_x']:.3f} · jump={phase['jump']:.3f}"
-        )
+        st.caption(f"Phase: abrupt={phase['is_abrupt']} · critical~{phase['critical_x']:.3f} · jump={phase['jump']:.3f}")
 
         fig = fig_metrics_over_steps(df_hist, title=f"{label} — кривые")
         st.plotly_chart(fig, use_container_width=True)
         return df_hist
 
     if run_one:
-        _run_and_render(attack_kind, f"{attack_kind_ui}")
+        _run_and_render(attack_kind, attack_kind_ui)
 
     if run_all:
         st.write("### Head-to-head")
@@ -648,9 +738,6 @@ with t4:
             fig_cmp = fig_compare_attacks(results, x_col="removed_frac", y_col="lcc_frac", title="Head-to-head: LCC")
             st.plotly_chart(fig_cmp, use_container_width=True)
 
-# -------------------------
-# Tab 5: Comparison
-# -------------------------
 with t5:
     st.subheader("🆚 Сравнение")
 
@@ -658,28 +745,17 @@ with t5:
     exps = st.session_state["experiments"]
 
     st.write("### Сравнить графы (скаляры)")
-    graph_ids = _sorted_graph_ids()
+    graph_ids = sorted_graph_ids()
     selected_graphs = st.multiselect(
-        "Выбери графы",
+        "Графы",
         options=graph_ids,
-        default=[graph_id],
+        default=[graph_id] if graph_id in graph_ids else [],
         format_func=lambda gid: f"{graphs[gid]['name']} ({graphs[gid]['source']})",
     )
 
     scalar = st.selectbox(
-        "Скаляр для сравнения",
-        [
-            "N",
-            "E",
-            "density",
-            "eff_w",
-            "l2_lcc",
-            "mod",
-            "lmax",
-            "entropy_deg",
-            "assortativity",
-            "clustering",
-        ],
+        "Скаляр",
+        ["N", "E", "density", "eff_w", "l2_lcc", "mod", "lmax", "entropy_deg", "assortativity", "clustering"],
     )
 
     if selected_graphs:
@@ -704,7 +780,7 @@ with t5:
     st.write("### Сравнить эксперименты (траектории)")
 
     if not exps:
-        st.info("Нет экспериментов. Запусти атаку в 💥 ATTACK LAB.")
+        st.info("Нет экспериментов. Запусти атаку в 💥.")
     else:
         exp_by_id = {e["id"]: e for e in exps}
         exp_ids = [e["id"] for e in exps]
