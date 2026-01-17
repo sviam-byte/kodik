@@ -1,6 +1,7 @@
 import numpy as np
-import pandas as pd
 import networkx as nx
+import pandas as pd
+
 
 
 def build_graph_from_edges(df_edges: pd.DataFrame, src_col: str, dst_col: str) -> nx.Graph:
@@ -16,10 +17,12 @@ def build_graph_from_edges(df_edges: pd.DataFrame, src_col: str, dst_col: str) -
     for _, _, d in G.edges(data=True):
         w = float(d.get("weight", 1.0))
         c = float(d.get("confidence", 0.0))
+
         if not np.isfinite(w) or w <= 0:
             w = 1e-12
         if not np.isfinite(c):
             c = 0.0
+
         d["weight"] = w
         d["confidence"] = c
     return G

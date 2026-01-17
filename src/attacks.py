@@ -75,10 +75,8 @@ def pick_targets_for_attack(
         H = add_dist_attr(G)
         n = H.number_of_nodes()
         k_samples = min(200, n)
-        try:
-            bc = nx.betweenness_centrality(H, k=k_samples, weight="dist", normalized=True, seed=int(seed))
-        except TypeError:
-            bc = nx.betweenness_centrality(H, k=k_samples, weight="dist", normalized=True)
+        # approximate betweenness for speed
+        bc = nx.betweenness_centrality(H, k=k_samples, weight="dist", normalized=True, seed=int(seed))
         return sorted(nodes, key=lambda n: bc.get(n, 0.0), reverse=True)[:step_size]
 
     if attack_kind == "kcore":

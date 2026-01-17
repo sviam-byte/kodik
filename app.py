@@ -27,9 +27,9 @@ from src.session_io import (
     import_experiments_json,
 )
 
-# =========================
+# -------------------------
 # Page
-# =========================
+# -------------------------
 st.set_page_config(page_title="прикольчик", layout="wide", page_icon="💀")
 st.title("прикольчик")
 
@@ -164,6 +164,8 @@ def experiments_for_graph(graph_id: str):
     """Filter experiments belonging to a particular graph id."""
     return [e for e in st.session_state["experiments"] if e.get("graph_id") == graph_id]
 
+SRC_COL = meta["SRC_COL"]
+DST_COL = meta["DST_COL"]
 
 # =========================
 # Sidebar: Workspace I/O + Add graphs

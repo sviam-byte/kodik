@@ -1,3 +1,4 @@
+import math
 import random
 import numpy as np
 import networkx as nx
@@ -7,6 +8,9 @@ import plotly.graph_objects as go
 from networkx.algorithms.community import modularity, louvain_communities
 
 
+# -------------------------
+# Helpers
+# -------------------------
 def add_dist_attr(G: nx.Graph) -> nx.Graph:
     """Copy a graph and add inverse-weight distance attribute for path algorithms."""
     H = G.copy()
@@ -46,6 +50,7 @@ def approx_weighted_efficiency(G: nx.Graph, sources_k: int, seed: int) -> float:
 
     est_full_sum = total * (N / max(1, k))
     return float(est_full_sum / denom)
+
 
 
 def spectral_radius_weighted_adjacency(G: nx.Graph) -> float:
