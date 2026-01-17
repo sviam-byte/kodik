@@ -207,6 +207,8 @@ def run_attack(
       states: list of graphs (если keep_states)
     """
     attack_kind = str(attack_kind)
+    # Always normalize the input graph to avoid failures in k-core/centralities.
+    G_in = _as_simple_undirected(G_in)
     if attack_kind in ("low_degree", "weak_strength"):
         H0 = _as_simple_undirected(G_in)
         N0 = H0.number_of_nodes()

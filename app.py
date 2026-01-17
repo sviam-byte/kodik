@@ -5,6 +5,7 @@
 import time
 import uuid
 import hashlib
+import textwrap
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from src.graph_build import build_graph_from_edges, lcc_subgraph
 from src.metrics import calculate_metrics, compute_3d_layout, make_3d_traces
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
 from src.attacks import run_attack  # node-attack runner from your src
+from src.attacks_mix import run_mix_attack
 from src.plotting import fig_metrics_over_steps, fig_compare_attacks
 from src.phase import classify_phase_transition
 from src.session_io import (
@@ -82,6 +84,17 @@ HELP_TEXT = {
 }
 def help_icon(key: str) -> str:
     return HELP_TEXT.get(key, "")
+
+METRIC_HELP = {
+    "lcc_frac": "Доля узлов в гигантской компоненте связности. Параметр порядка для перколяции.",
+    "eff_w": "Глобальная эффективность (среднее 1/кратчайшему пути; аппрокс по k источникам).",
+    "l2_lcc": "Алгебраическая связность λ₂ Лапласиана на LCC. 0≈распад связности, больше=лучше.",
+    "mod": "Модульность Louvain: выше=сильнее выражены сообщества.",
+    "H_deg": "Энтропия распределения степеней (шаг 1).",
+    "H_w": "Энтропия распределения весов рёбер (шаг 1).",
+    "H_conf": "Энтропия распределения confidence (шаг 1).",
+    "H_tri": "Энтропия распределения ‘треугольной поддержки’ (шаг 3, тяжёлая).",
+}
 
 # Node-attack presets (use src.attacks.run_attack)
 ATTACK_PRESETS_NODE = {
@@ -147,7 +160,7 @@ def _apply_plot_defaults(fig, height=780, y_range=None):
 
 def _forward_fill_heavy(df_hist: pd.DataFrame) -> pd.DataFrame:
     df = df_hist.copy()
-    for col in ["l2_lcc", "mod"]:
+    for col in ["l2_lcc", "mod", "H_tri"]:
         if col in df.columns:
             df[col] = df[col].replace([np.inf, -np.inf], np.nan).ffill()
     return df
@@ -654,6 +667,25 @@ with st.sidebar:
     min_weight = st.number_input("Min Weight", 0.0, 1000.0, 0.0, step=0.1, help="Отсечь ребра с малым весом")
 
     st.markdown("---")
+    st.subheader("📈 Визуализация")
+    if "plot_height" not in st.session_state:
+        st.session_state["plot_height"] = 900
+    if "norm_mode" not in st.session_state:
+        st.session_state["norm_mode"] = "none"
+
+    st.session_state["plot_height"] = st.slider(
+        "Высота графиков",
+        600, 1400, int(st.session_state["plot_height"]),
+        step=50,
+    )
+    st.session_state["norm_mode"] = st.selectbox(
+        "Нормировка кривых",
+        ["none", "rel0", "delta0", "minmax", "zscore"],
+        index=["none", "rel0", "delta0", "minmax", "zscore"].index(st.session_state["norm_mode"]),
+        help="rel0: y/y0, delta0: y-y0, minmax: [0..1], zscore: (y-mean)/std",
+    )
+
+    st.markdown("---")
     if st.button("🗑️ Сбросить всё", type="primary"):
         st.session_state["graphs"] = {}
         st.session_state["experiments"] = []
@@ -963,7 +995,11 @@ with tab_attack:
     # SINGLE RUN
     # --------------------------
     st.subheader("Single run")
-    family = st.radio("Тип атаки", ["Node (узлы)", "Edge (рёбра: слабые/сильные)"], horizontal=True)
+    family = st.radio(
+        "Тип атаки",
+        ["Node (узлы)", "Edge (рёбра: слабые/сильные)", "Mix/Entropy (Hrish)"],
+        horizontal=True,
+    )
 
     # Parameters stay on top-left; results are rendered below full-width.
     col_setup, _ = st.columns([1, 2])
@@ -1005,7 +1041,7 @@ with tab_attack:
                 }
                 kind = kind_map.get(attack_ui, "random")
 
-            else:
+            elif family.startswith("Edge"):
                 attack_ui = st.selectbox(
                     "Стратегия (рёбра)",
                     [
@@ -1018,7 +1054,64 @@ with tab_attack:
                 )
                 kind = attack_ui
 
+            else:
+                kind = st.selectbox(
+                    "Режим Hrish",
+                    [
+                        "hrish_mix",
+                        "mix_degree_preserving",
+                        "mix_weightconf_preserving",
+                    ],
+                    help="hrish_mix = rewire (degree-preserving) + replace из нулевой модели.",
+                )
+                replace_from = st.selectbox("Replace source", ["ER", "CFG"], index=0)
+                alpha_rewire = st.slider("alpha (rewire)", 0.0, 1.0, 0.6, 0.05)
+                beta_replace = st.slider("beta (replace)", 0.0, 1.0, 0.4, 0.05)
+                swaps_per_edge = st.slider("swaps_per_edge", 0.0, 3.0, 0.5, 0.1)
+                st.caption("Ось X здесь: mix_frac (0..1), а не removed_frac.")
+
             if st.button("🚀 RUN", type="primary", use_container_width=True):
+                if family.startswith("Mix/Entropy"):
+                    with st.spinner(f"Mix attack: {kind}"):
+                        df_hist, aux = run_mix_attack(
+                            G_view,
+                            kind=str(kind),
+                            steps=int(steps),
+                            seed=int(seed_run),
+                            eff_sources_k=int(eff_k),
+                            heavy_every=int(heavy_freq),
+                            alpha_rewire=float(alpha_rewire),
+                            beta_replace=float(beta_replace),
+                            swaps_per_edge=float(swaps_per_edge),
+                            replace_from=str(replace_from),
+                        )
+                        df_hist = _forward_fill_heavy(df_hist)
+                        phase_info = classify_phase_transition(
+                            df_hist.rename(columns={"mix_frac": "removed_frac"})
+                        )
+
+                        label = f"{active_entry['name']} | mix:{kind} | seed={seed_run}"
+                        if tag:
+                            label += f" [{tag}]"
+
+                        save_experiment(
+                            name=label,
+                            graph_id=active_entry["id"],
+                            kind=str(kind),
+                            params={
+                                "attack_family": "mix",
+                                "steps": int(steps),
+                                "seed": int(seed_run),
+                                "phase": phase_info,
+                                "eff_k": int(eff_k),
+                                "heavy_every": int(heavy_freq),
+                                **aux,
+                            },
+                            df_hist=df_hist,
+                        )
+                    st.success("Готово.")
+                    st.rerun()
+
                 if family.startswith("Node"):
                     # All node kinds are handled by src.attacks (including adaptive weak nodes).
                     with st.spinner(f"Node attack: {kind}"):
@@ -1098,6 +1191,9 @@ with tab_attack:
         exps_here.sort(key=lambda x: x["created_at"], reverse=True)
         last_exp = exps_here[0]
         df_res = _forward_fill_heavy(last_exp["history"].copy())
+        params = last_exp.get("params") or {}
+        fam = params.get("attack_family", "node")
+        xcol = "mix_frac" if fam == "mix" and "mix_frac" in df_res.columns else "removed_frac"
 
         ph = (last_exp.get("params") or {}).get("phase", {})
         if ph:
@@ -1115,19 +1211,32 @@ with tab_attack:
                     "- **eff_w**: глобальная эффективность (в среднем насколько короткие пути; выше = сеть “связнее”)\n"
                     "- **l2_lcc**: λ₂ (алгебраическая связность) для LCC; близко к 0 = “на грани распада”\n"
                     "- **mod**: модульность сообществ; рост часто означает фрагментацию на кластеры\n"
+                    "- **H_***: энтропии распределений (рост “случайности” структуры)\n"
                 )
-            fig = fig_metrics_over_steps(df_res, title="Метрики по шагам")
+            fig = fig_metrics_over_steps(
+                df_res,
+                title="Метрики по шагам",
+                normalize_mode=st.session_state["norm_mode"],
+                height=st.session_state["plot_height"],
+            )
             fig.update_layout(template="plotly_dark")
             # Make lines visible (eff_w can look "missing" on dark themes).
             fig.update_traces(mode="lines+markers")
             fig.update_traces(line_width=3)
-            fig = _apply_plot_defaults(fig, height=980)
+            fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"])
             st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("#### AUC (robustness) по выбранной метрике")
-            y_axis = st.selectbox("Метрика для AUC", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="auc_y_single")
-            if y_axis in df_res.columns and "removed_frac" in df_res.columns:
-                xs = pd.to_numeric(df_res["removed_frac"], errors="coerce")
+            y_axis = st.selectbox(
+                "Метрика для AUC",
+                [c for c in ["lcc_frac", "eff_w", "l2_lcc", "mod", "H_deg", "H_w", "H_conf", "H_tri"] if c in df_res.columns],
+                index=0,
+                key="auc_y_single",
+            )
+            st.caption(METRIC_HELP.get(y_axis, ""))
+
+            if y_axis in df_res.columns and xcol in df_res.columns:
+                xs = pd.to_numeric(df_res[xcol], errors="coerce")
                 ys = pd.to_numeric(df_res[y_axis], errors="coerce")
                 mask = xs.notna() & ys.notna()
                 if mask.sum() >= 2:
@@ -1136,21 +1245,36 @@ with tab_attack:
                 else:
                     st.info("Недостаточно точек для AUC.")
 
+            with st.expander("❓ Что на этих графиках", expanded=False):
+                txt = """
+                Ось X:
+                  - removed_frac: доля удалённых узлов/рёбер (атаки).
+                  - mix_frac: уровень энтропизации (Hrish mix), 0..1.
+
+                Ось Y:
+                  - lcc_frac: доля LCC (перколяция).
+                  - eff_w: эффективность (качество глобальной связности путей).
+                  - l2_lcc: λ₂ (спектральная связность LCC).
+                  - mod: модульность (структура сообществ).
+                  - H_*: энтропии распределений (рост “случайности”).
+                """
+                st.text(textwrap.dedent(txt).strip())
+
             with tabB:
                 # Canonical order-vs-control
-                if "removed_frac" in df_res.columns and "lcc_frac" in df_res.columns:
-                    fig_lcc = px.line(df_res, x="removed_frac", y="lcc_frac", title="Order parameter: LCC fraction vs removed fraction")
+                if xcol in df_res.columns and "lcc_frac" in df_res.columns:
+                    fig_lcc = px.line(df_res, x=xcol, y="lcc_frac", title="Order parameter: LCC fraction vs removed fraction")
                     fig_lcc.update_layout(template="plotly_dark")
                     fig_lcc = _apply_plot_defaults(fig_lcc, height=780, y_range=_auto_y_range(df_res["lcc_frac"]))
                     st.plotly_chart(fig_lcc, use_container_width=True)
 
                 # Susceptibility proxy
-                if "removed_frac" in df_res.columns and "lcc_frac" in df_res.columns:
-                    dfp = df_res.sort_values("removed_frac").copy()
-                    dx = pd.to_numeric(dfp["removed_frac"], errors="coerce").diff()
+                if xcol in df_res.columns and "lcc_frac" in df_res.columns:
+                    dfp = df_res.sort_values(xcol).copy()
+                    dx = pd.to_numeric(dfp[xcol], errors="coerce").diff()
                     dy = pd.to_numeric(dfp["lcc_frac"], errors="coerce").diff()
                     dfp["suscep"] = (dy / dx).replace([np.inf, -np.inf], np.nan)
-                    fig_s = px.line(dfp, x="removed_frac", y="suscep", title="Susceptibility proxy: d(LCC)/dx")
+                    fig_s = px.line(dfp, x=xcol, y="suscep", title="Susceptibility proxy: d(LCC)/dx")
                     fig_s.update_layout(template="plotly_dark")
                     fig_s = _apply_plot_defaults(fig_s, height=780, y_range=_auto_y_range(dfp["suscep"]))
                     st.plotly_chart(fig_s, use_container_width=True)
@@ -1168,15 +1292,14 @@ with tab_attack:
                         st.plotly_chart(fig_phase, use_container_width=True)
 
             with tabC:
-                params = last_exp.get("params") or {}
-                fam = params.get("attack_family", "node")
-
                 # precompute base layout to avoid jumpiness
                 base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
                 pos_base = compute_3d_layout(G_view, seed=base_seed)
 
                 # build per-step graph according to stored order
-                if fam == "node":
+                if fam == "mix":
+                    st.info("Для Mix/Entropy 3D-декомпозиция не поддерживается (нет порядка удаления).")
+                elif fam == "node":
                     removed_order = params.get("removed_order") or []
                     if not removed_order:
                         st.warning("Нет removed_order для 3D. (src.run_attack не дал, а fallback не сохранился.)")
@@ -1310,11 +1433,18 @@ with tab_attack:
         if curves:
             st.markdown("### Сравнение suite")
             y_axis = st.selectbox("Y", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="suite_y")
-            fig = fig_compare_attacks(curves, "removed_frac", y_axis, f"Suite compare: {y_axis}")
+            fig = fig_compare_attacks(
+                curves,
+                "removed_frac",
+                y_axis,
+                f"Suite compare: {y_axis}",
+                normalize_mode=st.session_state["norm_mode"],
+                height=st.session_state["plot_height"],
+            )
             fig.update_layout(template="plotly_dark")
             # auto y-range from concatenated values
             all_y = pd.concat([pd.to_numeric(df[y_axis], errors="coerce") for _, df in curves if y_axis in df.columns], ignore_index=True)
-            fig = _apply_plot_defaults(fig, height=820, y_range=_auto_y_range(all_y))
+            fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
             st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("#### AUC ranking")
@@ -1424,10 +1554,17 @@ with tab_attack:
         if multi_curves:
             st.markdown("### Multi сравнение")
             y = st.selectbox("Y (multi)", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="mg_y")
-            fig = fig_compare_attacks(multi_curves, "removed_frac", y, f"Multi compare: {y}")
+            fig = fig_compare_attacks(
+                multi_curves,
+                "removed_frac",
+                y,
+                f"Multi compare: {y}",
+                normalize_mode=st.session_state["norm_mode"],
+                height=st.session_state["plot_height"],
+            )
             fig.update_layout(template="plotly_dark")
             all_y = pd.concat([pd.to_numeric(df[y], errors="coerce") for _, df in multi_curves if y in df.columns], ignore_index=True)
-            fig = _apply_plot_defaults(fig, height=820, y_range=_auto_y_range(all_y))
+            fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Запусти multi suite слева, чтобы увидеть сравнение.")
@@ -1495,21 +1632,36 @@ with tab_compare:
             y_axis = st.selectbox("Y Axis", ["lcc_frac", "eff_w", "mod", "l2_lcc"], index=0)
             if sel_exps:
                 curves = []
+                x_candidates = []
                 for eid in sel_exps:
                     e = next(x for x in exps if x["id"] == eid)
-                    curves.append((e["name"], _forward_fill_heavy(e["history"])))
+                    df_hist = _forward_fill_heavy(e["history"])
+                    curves.append((e["name"], df_hist))
+                    if "mix_frac" in df_hist.columns:
+                        x_candidates.append("mix_frac")
+                    else:
+                        x_candidates.append("removed_frac")
 
-                fig_lines = fig_compare_attacks(curves, "removed_frac", y_axis, f"Comparison: {y_axis}")
+                x_col = "mix_frac" if x_candidates and all(x == "mix_frac" for x in x_candidates) else "removed_frac"
+
+                fig_lines = fig_compare_attacks(
+                    curves,
+                    x_col,
+                    y_axis,
+                    f"Comparison: {y_axis}",
+                    normalize_mode=st.session_state["norm_mode"],
+                    height=st.session_state["plot_height"],
+                )
                 fig_lines.update_layout(template="plotly_dark")
                 all_y = pd.concat([pd.to_numeric(df[y_axis], errors="coerce") for _, df in curves if y_axis in df.columns], ignore_index=True)
-                fig_lines = _apply_plot_defaults(fig_lines, height=820, y_range=_auto_y_range(all_y))
+                fig_lines = _apply_plot_defaults(fig_lines, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
                 st.plotly_chart(fig_lines, use_container_width=True)
 
                 st.markdown("#### Robustness (AUC)")
                 auc_rows = []
                 for name, df in curves:
-                    if y_axis in df.columns and "removed_frac" in df.columns:
-                        xs = pd.to_numeric(df["removed_frac"], errors="coerce")
+                    if y_axis in df.columns and x_col in df.columns:
+                        xs = pd.to_numeric(df[x_col], errors="coerce")
                         ys = pd.to_numeric(df[y_axis], errors="coerce")
                         mask = xs.notna() & ys.notna()
                         if mask.sum() >= 2:
