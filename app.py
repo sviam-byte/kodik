@@ -1,6 +1,4 @@
-# =========================
-# app.py
-# =========================
+
 
 import time
 import uuid
@@ -14,13 +12,12 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-# Local imports from your structure
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
 from src.metrics import calculate_metrics, compute_3d_layout, make_3d_traces
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
-from src.attacks import run_attack  # node-attack runner from your src
+from src.attacks import run_attack 
 from src.attacks_mix import run_mix_attack
 from src.plotting import fig_metrics_over_steps, fig_compare_attacks
 from src.phase import classify_phase_transition
@@ -30,10 +27,6 @@ from src.session_io import (
     export_experiments_json,
     import_experiments_json,
 )
-
-# ============================================================
-# 0) CONFIG
-# ============================================================
 st.set_page_config(
     page_title="Kodik Lab",
     layout="wide",
@@ -63,10 +56,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-# ============================================================
-# 1) HELP + PRESETS (includes "weak" attacks)
-# ============================================================
 HELP_TEXT = {
     "N": "Количество узлов (Nodes).",
     "E": "Количество рёбер (Edges).",
@@ -77,7 +66,6 @@ HELP_TEXT = {
     "Lambda2": "Алгебраическая связность (λ₂).",
     "Assortativity": "Ассортативность по степеням.",
     "Clustering": "Коэффициент кластеризации.",
-    # Entropy profile
     "H_deg": "Энтропия распределения степеней. Насколько разнообразны «роли» узлов.",
     "H_w": "Энтропия распределения весов рёбер. Насколько тонко настроены связи.",
     "H_conf": "Энтропия распределения confidence. Насколько неоднородна/надёжна структура.",
@@ -103,7 +91,6 @@ METRIC_HELP = {
     "H_tri": "Энтропия распределения ‘треугольной поддержки’ (шаг 3, тяжёлая).",
 }
 
-# Node-attack presets (use src.attacks.run_attack)
 ATTACK_PRESETS_NODE = {
     "Node core suite (быстро)": [
         {"kind": "random", "seeds": 3},
@@ -113,8 +100,8 @@ ATTACK_PRESETS_NODE = {
         {"kind": "richclub_top", "seeds": 2},
     ],
     "Node weak suite (слабые узлы)": [
-        {"kind": "low_degree", "seeds": 5},      # NEW
-        {"kind": "weak_strength", "seeds": 5},   # NEW
+        {"kind": "low_degree", "seeds": 5},      
+        {"kind": "weak_strength", "seeds": 5},   
     ],
     "Node stress suite (жёстко)": [
         {"kind": "degree", "seeds": 5},
@@ -124,7 +111,6 @@ ATTACK_PRESETS_NODE = {
     ],
 }
 
-# Edge-attack presets (implemented in this app.py)
 ATTACK_PRESETS_EDGE = {
     "Edge weak suite (слабые связи)": [
         {"kind": "weak_edges_by_weight", "seeds": 1},
@@ -136,9 +122,6 @@ ATTACK_PRESETS_EDGE = {
     ],
 }
 
-# ============================================================
-# 2) UTIL (robustness, ranges, graph-type safety)
-# ============================================================
 AUC_TRAP = getattr(np, "trapezoid", None) or getattr(np, "trapz")
 
 def new_id(prefix: str) -> str:
@@ -240,11 +223,11 @@ def _fallback_removal_order(G: nx.Graph, kind: str, seed: int):
         nodes.sort(key=lambda n: H.degree(n), reverse=True)
         return nodes
 
-    if kind in ("low_degree",):  # NEW: weak nodes
+    if kind in ("low_degree",):  
         nodes.sort(key=lambda n: H.degree(n))
         return nodes
 
-    if kind in ("weak_strength",):  # NEW: weak nodes by weights
+    if kind in ("weak_strength",): 
         nodes.sort(key=lambda n: _strength(H, n))
         return nodes
 
@@ -281,9 +264,6 @@ def _compute_metrics_snapshot(G: nx.Graph, eff_k: int, seed: int, heavy: bool):
     m = calculate_metrics(G, eff_sources_k=int(eff_k), seed=int(seed))
     return m
 
-# ============================================================
-# 3) EDGE-ATTACK (weak edges) implemented here (no src changes)
-# ============================================================
 def run_edge_attack(
     G: nx.Graph,
     kind: str,
@@ -320,21 +300,16 @@ def run_edge_attack(
 
     steps = int(steps)
     steps = max(1, steps)
-    # removal counts per step (monotone)
     ks = np.linspace(0, remove_total, steps + 1).round().astype(int).tolist()
 
     removed_order = [(u, v) for (u, v, _) in edges[:remove_total]]
 
-    # base graph for iterative removal
     H = H0.copy()
 
     rows = []
     last_heavy = None
     for i, k in enumerate(ks):
-        # rebuild from scratch each step? expensive. instead: remove incrementally.
-        # we need incremental removal: remove delta edges since last step.
         if i == 0:
-            # nothing removed
             pass
         else:
             prev = ks[i - 1]
@@ -363,7 +338,6 @@ def run_edge_attack(
             "eff_w": float(m.get("eff_w", np.nan)) if "eff_w" in m else np.nan,
         }
 
-        # heavy metrics: fill only when computed; otherwise NaN then ffill later
         if heavy:
             row["mod"] = float(m.get("mod", np.nan)) if "mod" in m else np.nan
             row["l2_lcc"] = float(m.get("l2_lcc", np.nan)) if "l2_lcc" in m else np.nan
@@ -388,8 +362,8 @@ def run_edge_attack(
 # ============================================================
 def _init_state():
     defaults = {
-        "graphs": {},                 # gid -> entry
-        "experiments": [],            # list of experiments
+        "graphs": {},                 
+        "experiments": [],            
         "active_graph_id": None,
         "seed": 42,
         "last_upload_hash": None,
@@ -457,7 +431,6 @@ def run_node_attack_suite(
         for i in range(nseeds):
             seed_i = int(base_seed) + 1000 * (abs(hash(kind)) % 97) + i
 
-            # src.attacks.run_attack handles all node kinds (including weak nodes).
             df_hist, aux = run_attack(
                 G, kind, float(frac), int(steps), int(seed_i), int(eff_k),
                 rc_frac=float(rc_frac), compute_heavy_every=int(heavy_freq)
@@ -930,7 +903,6 @@ with tab_struct:
             G_draw = G_view
             pos3d = pos3d_base
         else:
-            # For now same as fixed; recompute on view
             pos3d = compute_3d_layout(G_view, seed=base_seed)
 
         edge_trace, node_trace = make_3d_traces(G_view, pos3d, show_scale=True)
@@ -1017,7 +989,7 @@ with tab_null:
         er_density = 2 * M / (N * (N - 1)) if N > 1 else 0.0
         er_clustering = er_density
 
-        met_light = met  # from tab_main calculation
+        met_light = met  
         cmp_df = pd.DataFrame({
             "Metric": ["Avg Degree", "Density", "Clustering (C)", "Modularity (примерно)"],
             "Active Graph": [met_light.get("avg_degree", np.nan), met_light.get("density", np.nan), met_light.get("clustering", np.nan), met_light.get("mod", np.nan)],
@@ -1041,7 +1013,6 @@ with tab_attack:
         horizontal=True,
     )
 
-    # Parameters stay on top-left; results are rendered below full-width.
     col_setup, _ = st.columns([1, 2])
 
     with col_setup:
@@ -1066,8 +1037,8 @@ with tab_attack:
                         "betweenness (Bridges)",
                         "kcore (Deep Core)",
                         "richclub_top (Top Strength)",
-                        "low_degree (Weak nodes)",       # adaptive in src.attacks
-                        "weak_strength (Weak strength)", # adaptive in src.attacks
+                        "low_degree (Weak nodes)",       
+                        "weak_strength (Weak strength)",
                     ],
                 )
                 kind_map = {
@@ -1153,7 +1124,6 @@ with tab_attack:
                     st.rerun()
 
                 if family.startswith("Node"):
-                    # All node kinds are handled by src.attacks (including adaptive weak nodes).
                     with st.spinner(f"Node attack: {kind}"):
                         df_hist, aux = run_attack(
                             G_view, kind, float(frac), int(steps), int(seed_run), int(eff_k),
@@ -1220,7 +1190,6 @@ with tab_attack:
                     st.success("Готово.")
                     st.rerun()
 
-    # FULL-WIDTH RESULTS (rendered below the controls)
     st.markdown("---")
     st.markdown("## Последний результат (для текущего графа)")
 
@@ -1260,7 +1229,6 @@ with tab_attack:
                 height=st.session_state["plot_height"],
             )
             fig.update_layout(template="plotly_dark")
-            # Make lines visible (eff_w can look "missing" on dark themes).
             fig.update_traces(mode="lines+markers")
             fig.update_traces(line_width=3)
             fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"])
@@ -1301,14 +1269,12 @@ with tab_attack:
                 st.text(textwrap.dedent(txt).strip())
 
             with tabB:
-                # Canonical order-vs-control
                 if xcol in df_res.columns and "lcc_frac" in df_res.columns:
                     fig_lcc = px.line(df_res, x=xcol, y="lcc_frac", title="Order parameter: LCC fraction vs removed fraction")
                     fig_lcc.update_layout(template="plotly_dark")
                     fig_lcc = _apply_plot_defaults(fig_lcc, height=780, y_range=_auto_y_range(df_res["lcc_frac"]))
                     st.plotly_chart(fig_lcc, use_container_width=True)
 
-                # Susceptibility proxy
                 if xcol in df_res.columns and "lcc_frac" in df_res.columns:
                     dfp = df_res.sort_values(xcol).copy()
                     dx = pd.to_numeric(dfp[xcol], errors="coerce").diff()
@@ -1319,7 +1285,6 @@ with tab_attack:
                     fig_s = _apply_plot_defaults(fig_s, height=780, y_range=_auto_y_range(dfp["suscep"]))
                     st.plotly_chart(fig_s, use_container_width=True)
 
-                # Secondary phase portrait (Q vs lambda2)
                 if "mod" in df_res.columns and "l2_lcc" in df_res.columns:
                     dfp2 = df_res.copy()
                     dfp2["mod"] = pd.to_numeric(dfp2["mod"], errors="coerce")
@@ -1332,11 +1297,9 @@ with tab_attack:
                         st.plotly_chart(fig_phase, use_container_width=True)
 
             with tabC:
-                # precompute base layout to avoid jumpiness
                 base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
                 pos_base = compute_3d_layout(G_view, seed=base_seed)
 
-                # build per-step graph according to stored order
                 if fam == "mix":
                     st.info("Для Mix/Entropy 3D-декомпозиция не поддерживается (нет порядка удаления).")
                 elif fam == "node":
@@ -1345,7 +1308,6 @@ with tab_attack:
                         st.warning("Нет removed_order для 3D. (src.run_attack не дал, а fallback не сохранился.)")
                     else:
                         max_steps = max(1, len(df_res) - 1)
-                        # slider with state key
                         step_val = st.slider("Шаг (3D)", 0, max_steps, int(st.session_state.get("__decomp_step", 0)), key="__decomp_step_slider")
                         st.session_state["__decomp_step"] = int(step_val)
 
@@ -1482,7 +1444,6 @@ with tab_attack:
                 height=st.session_state["plot_height"],
             )
             fig.update_layout(template="plotly_dark")
-            # auto y-range from concatenated values
             all_y = pd.concat([pd.to_numeric(df[y_axis], errors="coerce") for _, df in curves if y_axis in df.columns], ignore_index=True)
             fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
             st.plotly_chart(fig, use_container_width=True)
