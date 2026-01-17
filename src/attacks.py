@@ -1,9 +1,86 @@
 import random
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import networkx as nx
 
 from .metrics import calculate_metrics, add_dist_attr
+
+# NOTE: app.py imports run_attack from this module.
+# We extend it with adaptive "weak-node" strategies that choose
+# the next weakest nodes at every step:
+# - low_degree: remove current minimum-degree nodes step-by-step
+# - weak_strength: remove current minimum-strength nodes (sum of weights)
+
+def _as_simple_undirected(G: nx.Graph) -> nx.Graph:
+    """
+    Convert to a simple undirected graph so ranking metrics do not break.
+    - DiGraph -> undirected
+    - MultiGraph -> Graph (merge edges, sum weights)
+    """
+    H = G
+    if hasattr(H, "is_directed") and H.is_directed():
+        H = H.to_undirected(as_view=False)
+
+    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
+        simple = nx.Graph()
+        simple.add_nodes_from(H.nodes(data=True))
+        for u, v, d in H.edges(data=True):
+            w = d.get("weight", 1.0)
+            try:
+                w = float(w)
+            except Exception:
+                w = 1.0
+            if simple.has_edge(u, v):
+                simple[u][v]["weight"] = float(simple[u][v].get("weight", 0.0)) + w
+            else:
+                simple.add_edge(u, v, weight=w)
+        return simple
+
+    return nx.Graph(H)
+
+
+def _strength(G: nx.Graph, n) -> float:
+    """Weighted strength for a node (sum of incident edge weights)."""
+    strength = 0.0
+    for _, _, d in G.edges(n, data=True):
+        w = d.get("weight", 1.0)
+        try:
+            strength += float(w)
+        except Exception:
+            strength += 1.0
+    return float(strength)
+
+
+def _pick_nodes_adaptive(
+    H: nx.Graph,
+    attack_kind: str,
+    k: int,
+    rng: np.random.Generator,
+) -> Optional[list]:
+    """
+    Pick k nodes from the CURRENT graph H according to adaptive strategy.
+    Returns None for unsupported strategies to fall back to existing code.
+    """
+    if k <= 0 or H.number_of_nodes() == 0:
+        return []
+
+    nodes = list(H.nodes())
+
+    if attack_kind == "random":
+        rng.shuffle(nodes)
+        return nodes[:k]
+
+    if attack_kind == "low_degree":
+        nodes.sort(key=lambda n: H.degree(n))
+        return nodes[:k]
+
+    if attack_kind == "weak_strength":
+        nodes.sort(key=lambda n: _strength(H, n))
+        return nodes[:k]
+
+    return None
 
 # =========================
 # Rich-Club helpers
@@ -129,6 +206,86 @@ def run_attack(
       df_hist: stepwise metrics
       states: list of graphs (если keep_states)
     """
+    attack_kind = str(attack_kind)
+    if attack_kind in ("low_degree", "weak_strength"):
+        H0 = _as_simple_undirected(G_in)
+        N0 = H0.number_of_nodes()
+        if N0 < 2:
+            return pd.DataFrame(), {"removed_nodes": [], "states": []}
+
+        rng = np.random.default_rng(int(seed))
+        H = H0.copy()
+        states = []
+        removed_nodes = []
+
+        total_remove = int(N0 * float(remove_frac))
+        total_remove = max(0, min(total_remove, N0))
+        steps_count = max(1, int(steps))
+        ks = np.linspace(0, total_remove, steps_count + 1).round().astype(int).tolist()
+
+        history = []
+        removed_total = 0
+
+        for step in range(steps_count):
+            if H.number_of_nodes() < 2:
+                break
+
+            if keep_states:
+                states.append(H.copy())
+
+            heavy = (step % max(1, int(compute_heavy_every)) == 0)
+            if heavy:
+                met = calculate_metrics(H, eff_sources_k=int(eff_sources_k), seed=int(seed))
+            else:
+                met = {
+                    "N": H.number_of_nodes(),
+                    "E": H.number_of_edges(),
+                    "C": nx.number_connected_components(H) if H.number_of_nodes() else 0,
+                    "eff_w": np.nan,
+                    "l2_lcc": np.nan,
+                    "tau_lcc": np.nan,
+                    "lmax": np.nan,
+                    "thresh": np.nan,
+                    "mod": np.nan,
+                    "density": nx.density(H) if H.number_of_nodes() > 1 else 0.0,
+                    "avg_degree": (2 * H.number_of_edges() / H.number_of_nodes()) if H.number_of_nodes() else 0.0,
+                    "beta": int(H.number_of_edges() - H.number_of_nodes() + nx.number_connected_components(H)) if H.number_of_nodes() else 0,
+                    "lcc_size": len(max(nx.connected_components(H), key=len)) if H.number_of_nodes() else 0,
+                    "lcc_frac": 0.0,
+                    "entropy_deg": np.nan,
+                    "assortativity": np.nan,
+                    "clustering": np.nan,
+                    "diameter_approx": None,
+                }
+
+            met["step"] = int(step)
+            met["nodes_left"] = int(H.number_of_nodes())
+            met["removed_total"] = int(removed_total)
+            met["removed_frac"] = float(removed_total / max(1, N0))
+            met["lcc_frac"] = lcc_fraction(H, N0)
+
+            history.append(met)
+
+            next_k = ks[step + 1]
+            delta = int(next_k - removed_total)
+            if delta > 0:
+                picked = _pick_nodes_adaptive(H, attack_kind, delta, rng)
+                if picked is None:
+                    break
+                H.remove_nodes_from(picked)
+                removed_nodes.extend(picked)
+                removed_total += len(picked)
+
+            if removed_total >= total_remove:
+                break
+
+        if keep_states and H.number_of_nodes() > 0:
+            states.append(H.copy())
+
+        df_hist = pd.DataFrame(history)
+        aux = {"removed_nodes": removed_nodes, "mode": "adaptive", "states": states}
+        return df_hist, aux
+
     G_curr = G_in.copy()
     N0 = G_curr.number_of_nodes()
     if N0 < 2:
