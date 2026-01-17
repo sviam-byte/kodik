@@ -81,7 +81,6 @@ HELP_TEXT = {
     "H_deg": "Энтропия распределения степеней. Насколько разнообразны «роли» узлов.",
     "H_w": "Энтропия распределения весов рёбер. Насколько тонко настроены связи.",
     "H_conf": "Энтропия распределения confidence. Насколько неоднородна/надёжна структура.",
-    # Advanced phys-ish
     "tau_relax": "Время релаксации τ ~ 1/λ₂ (на LCC). Больше τ = медленнее затухают возмущения.",
     "beta_red": "Редандантность β: доля «лишних» рёбер сверх остова. 0=дерево, выше=больше альтернативных путей.",
     "epi_thr": "Порог распространения (эпидемический) ~ 1/λ_max. Меньше порог = легче распространяется возбуждение.",
@@ -848,20 +847,18 @@ with tab_main:
     m4.metric("Clustering", f"{float(met.get('clustering', 0.0)):.4f}", help=help_icon("Clustering"))
 
     st.markdown("---")
-    st.subheader("Entropy Profile")
     e1, e2, e3 = st.columns(3)
     e1.metric("H_deg", f"{float(met.get('H_deg', float('nan'))):.4f}", help=help_icon("H_deg"))
     e2.metric("H_w", f"{float(met.get('H_w', float('nan'))):.4f}", help=help_icon("H_w"))
     e3.metric("H_conf", f"{float(met.get('H_conf', float('nan'))):.4f}", help=help_icon("H_conf"))
 
-    with st.expander("❔ Что это значит (Entropy Profile)", expanded=False):
+    with st.expander("❔", expanded=False):
         st.markdown(
             "- **H_deg**: насколько разнообразны роли узлов (иерархия vs распределённость)\n"
             "- **H_w**: насколько «тонко» настроены силы связей (разнообразие весов)\n"
             "- **H_conf**: неоднородность/надёжность структуры (по confidence)\n"
         )
 
-    st.subheader("Advanced (phys-ish)")
     a1, a2, a3 = st.columns(3)
     a1.metric(
         "τ (Relaxation)",
@@ -875,7 +872,7 @@ with tab_main:
         help=help_icon("epi_thr"),
     )
 
-    with st.expander("❔ Что это значит (Advanced)", expanded=False):
+    with st.expander("❔", expanded=False):
         st.markdown(
             "- **τ ~ 1/λ₂**: если τ больше, сеть медленнее «расслабляется» после возмущения\n"
             "- **β**: сколько альтернативных путей есть (сколько «циклов» сверх остова)\n"
