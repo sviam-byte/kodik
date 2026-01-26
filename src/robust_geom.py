@@ -1,3 +1,4 @@
+# src/robust_geom.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,42 +10,65 @@ import numpy as np
 import networkx as nx
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def add_dist_attr(G: nx.Graph) -> nx.Graph:
-    """Copy a graph and add inverse-weight distance attribute for path algorithms."""
+    """Copy graph and add 'dist'=1/weight for path computations."""
     H = G.copy()
     for _, _, d in H.edges(data=True):
-        w = float(d.get("weight", 1.0))
+        w = d.get("weight", 1.0)
+        try:
+            w = float(w)
+        except Exception:
+            w = 1.0
         d["dist"] = 1.0 / w if w > 0 else 1e12
     return H
 
 
-# ------------------------------------------------------------
-# 1) Entropy rate of random walk
-# ------------------------------------------------------------
-def network_entropy_rate(G: nx.Graph, *, base: float = math.e) -> float:
-    """
-    Entropy rate:
-        H_rw = - Σ_i π_i Σ_j P_ij log P_ij
-
-    where P_ij = w_ij / strength(i) (undirected, weighted random walk),
-    π_i = strength(i) / Σ_k strength(k).
-
-    Returns nats if base=e, bits if base=2.
-    """
-    if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
-        return 0.0
-
+def _as_undirected_simple(G: nx.Graph) -> nx.Graph:
     H = G
     if hasattr(H, "is_directed") and H.is_directed():
         H = H.to_undirected(as_view=False)
+
+    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
+        S = nx.Graph()
+        S.add_nodes_from(H.nodes(data=True))
+        for u, v, d in H.edges(data=True):
+            w = d.get("weight", 1.0)
+            try:
+                w = float(w)
+            except Exception:
+                w = 1.0
+            w = max(0.0, w)
+            if S.has_edge(u, v):
+                S[u][v]["weight"] = float(S[u][v].get("weight", 0.0)) + w
+            else:
+                S.add_edge(u, v, weight=w)
+        return S
+
+    return nx.Graph(H)
+
+
+# -----------------------------
+# 1) Entropy rate of random walk
+# -----------------------------
+def network_entropy_rate(G: nx.Graph, base: float = math.e, **_ignored) -> float:
+    """
+    Entropy rate:
+        H_rw = - Σ_i π_i Σ_j P_ij log P_ij
+    where P_ij = w_ij / strength(i), π_i = strength(i)/Σ strength.
+    """
+    H = _as_undirected_simple(G)
+    if H.number_of_nodes() < 2 or H.number_of_edges() == 0:
+        return 0.0
 
     strength = dict(H.degree(weight="weight"))
     total_strength = float(sum(max(0.0, float(s)) for s in strength.values()))
     if total_strength <= 0:
         return 0.0
 
-    log = math.log
-    log_base = log(base)
+    log_base = math.log(base)
 
     out = 0.0
     for i in H.nodes():
@@ -53,7 +77,7 @@ def network_entropy_rate(G: nx.Graph, *, base: float = math.e) -> float:
             continue
         pi_i = s_i / total_strength
 
-        row = 0.0
+        row_ent = 0.0
         for j, d in H[i].items():
             w = d.get("weight", 1.0)
             try:
@@ -64,18 +88,17 @@ def network_entropy_rate(G: nx.Graph, *, base: float = math.e) -> float:
                 continue
             p = w / s_i
             if p > 0:
-                row -= p * log(p) / log_base
+                row_ent -= p * (math.log(p) / log_base)
 
-        out += pi_i * row
+        out += pi_i * row_ent
 
     return float(out)
 
 
-# ------------------------------------------------------------
-# 2) Ollivier–Ricci curvature
-# ------------------------------------------------------------
+# -----------------------------
+# 2) Ollivier–Ricci curvature (transport W1)
+# -----------------------------
 def _one_step_measure(H: nx.Graph, x) -> Dict:
-    """µ_x(y) for neighbors y, proportional to w_xy."""
     neigh = list(H.neighbors(x))
     if not neigh:
         return {}
@@ -96,7 +119,6 @@ def _one_step_measure(H: nx.Graph, x) -> Dict:
 
 
 def _quantize_probs(probs: Dict, scale: int) -> Tuple[List, List[int]]:
-    """Map {node: p} -> (nodes, integer masses) summing exactly to scale."""
     items = [(k, float(v)) for k, v in probs.items() if float(v) > 0]
     if not items:
         return [], []
@@ -140,10 +162,6 @@ def _emd_w1_transport(
     scale: int,
     missing_cost: float,
 ) -> float:
-    """
-    Exact W1 using transportation min-cost flow (network_simplex).
-    Costs are real; we scale demands to integers, keep costs as floats.
-    """
     S_nodes, S_mass = _quantize_probs(supply, scale)
     D_nodes, D_mass = _quantize_probs(demand, scale)
     if not S_nodes or not D_nodes:
@@ -173,27 +191,18 @@ def ollivier_ricci_edge(
     *,
     max_support: int = 60,
     cutoff: float = 8.0,
-    scale: int = 200_000,
+    scale: int = 120_000,
     missing_cost: float = 1e6,
-) -> float | None:
+) -> Optional[float]:
     """
-    κ(x,y) = 1 - W1(µ_x, µ_y) / d(x,y)
-
-    Distances use kodik convention: edge dist = 1/weight (stored in attr 'dist'),
-    and shortest paths are computed with Dijkstra on that 'dist'.
+    κ(x,y) = 1 - W1(µ_x, µ_y)/d(x,y)
+    Distances use dist=1/weight.
     """
-    if G.number_of_edges() == 0:
-        return None
-
-    H = G
-    if hasattr(H, "is_directed") and H.is_directed():
-        H = H.to_undirected(as_view=False)
-
+    H = _as_undirected_simple(G)
     if not H.has_edge(x, y):
         return None
 
     Hw = add_dist_attr(H)
-
     mu_x = _one_step_measure(H, x)
     mu_y = _one_step_measure(H, y)
     if not mu_x or not mu_y:
@@ -204,12 +213,10 @@ def ollivier_ricci_edge(
     if (len(sx) + len(sy)) > int(max_support):
         return None
 
-    # d(x,y): direct edge distance (1/weight)
     dxy = float(Hw[x][y].get("dist", 1.0))
     if not np.isfinite(dxy) or dxy <= 0:
         return None
 
-    # pairwise distances between supports via Dijkstra (bounded)
     dist = {}
     for u in sx:
         dists = nx.single_source_dijkstra_path_length(Hw, u, cutoff=float(cutoff), weight="dist")
@@ -218,8 +225,7 @@ def ollivier_ricci_edge(
                 dist[(u, v)] = float(dists[v])
 
     W1 = _emd_w1_transport(mu_x, mu_y, dist, scale=int(scale), missing_cost=float(missing_cost))
-    kappa = 1.0 - (W1 / dxy)
-    return float(kappa)
+    return float(1.0 - (W1 / dxy))
 
 
 @dataclass
@@ -233,20 +239,16 @@ class CurvatureSummary:
 
 def ollivier_ricci_summary(
     G: nx.Graph,
-    *,
     sample_edges: int = 150,
     seed: int = 42,
     max_support: int = 60,
     cutoff: float = 8.0,
-    scale: int = 200_000,
+    scale: int = 120_000,
+    **_ignored,
 ) -> CurvatureSummary:
-    """Compute summary stats of κ over a random sample of edges."""
-    if G.number_of_edges() == 0:
+    H = _as_undirected_simple(G)
+    if H.number_of_edges() == 0:
         return CurvatureSummary(0.0, 0.0, 0.0, 0, 0)
-
-    H = G
-    if hasattr(H, "is_directed") and H.is_directed():
-        H = H.to_undirected(as_view=False)
 
     edges = list(H.edges())
     rng = random.Random(int(seed))
@@ -255,16 +257,8 @@ def ollivier_ricci_summary(
 
     kappas: List[float] = []
     skipped = 0
-
     for x, y in edges:
-        k = ollivier_ricci_edge(
-            H,
-            x,
-            y,
-            max_support=max_support,
-            cutoff=cutoff,
-            scale=scale,
-        )
+        k = ollivier_ricci_edge(H, x, y, max_support=max_support, cutoff=cutoff, scale=scale)
         if k is None or not np.isfinite(k):
             skipped += 1
             continue
@@ -283,135 +277,69 @@ def ollivier_ricci_summary(
     )
 
 
-# ------------------------------------------------------------
+# -----------------------------
 # 3) Fragility proxies
-# ------------------------------------------------------------
-def fragility_from_entropy(h_rw: float, eps: float = 1e-9) -> float:
-    """Higher entropy rate -> lower fragility."""
-    if not np.isfinite(h_rw):
+# -----------------------------
+def fragility_from_entropy(h: float, eps: float = 1e-9, **_ignored) -> float:
+    if not np.isfinite(h):
         return float("nan")
-    return float(1.0 / max(eps, float(h_rw)))
+    return float(1.0 / max(eps, float(h)))
 
 
-def fragility_from_curvature(kappa_mean: float, eps: float = 1e-9) -> float:
-    """
-    κ̄ can be negative; map to positive score using shift:
-        frag = 1 / max(eps, 1 + κ̄)
-    """
+def fragility_from_curvature(kappa_mean: float, eps: float = 1e-9, **_ignored) -> float:
     if not np.isfinite(kappa_mean):
         return float("nan")
     return float(1.0 / max(eps, 1.0 + float(kappa_mean)))
 
 
-# ------------------------------------------------------------
-# 4) Demetrius evolutionary entropy (PF-Markov construction)
-# ------------------------------------------------------------
-@dataclass
-class PFMarkov:
-    nodes: List
-    lam: float
-    u: np.ndarray          # right PF eigenvector (positive)
-    v: np.ndarray          # left PF eigenvector (positive)
-    P: "np.ndarray"        # dense transition matrix (row-stochastic)
+# -----------------------------
+# 4) Demetrius evolutionary entropy (PF-Markov)
+# -----------------------------
+def _pf_eigs_sparse(A):
+    import scipy.sparse.linalg as spla
+    vals_r, vecs_r = spla.eigs(A, k=1, which="LR")
+    lam = float(np.real(vals_r[0]))
+    u = np.real(vecs_r[:, 0])
+    vals_l, vecs_l = spla.eigs(A.T, k=1, which="LR")
+    v = np.real(vecs_l[:, 0])
+    return lam, u, v
 
 
-def _largest_pf_eigs(A_csr):
+def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e, **_ignored) -> float:
     """
-    Return (lam, u_right, v_left) for a nonnegative matrix A (sparse).
-    Uses scipy if available; falls back to numpy (dense) for tiny graphs.
+    Build PF-Markov chain from adjacency A and compute entropy rate:
+      P_ij = a_ij * u_j / (lam * u_i),  π_i ∝ u_i v_i
+      H_evo = -Σ_i π_i Σ_j P_ij log P_ij
     """
-    n = A_csr.shape[0]
-    # Try sparse eigs first
-    try:
-        import scipy.sparse.linalg as spla
+    H = _as_undirected_simple(G)
+    if H.number_of_nodes() < 2 or H.number_of_edges() == 0:
+        return float("nan")
 
-        # Right eigenvector of A
-        vals_r, vecs_r = spla.eigs(A_csr, k=1, which="LR")
-        lam = float(np.real(vals_r[0]))
-        u = np.real(vecs_r[:, 0])
-
-        # Left eigenvector = right eigenvector of A^T
-        vals_l, vecs_l = spla.eigs(A_csr.T, k=1, which="LR")
-        v = np.real(vecs_l[:, 0])
-
-        return lam, u, v
-    except Exception:
-        # Dense fallback (small n)
-        A = A_csr.toarray().astype(float)
-        vals, vecs = np.linalg.eig(A)
-        idx = int(np.argmax(np.real(vals)))
-        lam = float(np.real(vals[idx]))
-        u = np.real(vecs[:, idx])
-
-        vals2, vecs2 = np.linalg.eig(A.T)
-        idx2 = int(np.argmax(np.real(vals2)))
-        v = np.real(vecs2[:, idx2])
-
-        return lam, u, v
-
-
-def demetrius_pf_markov(G: nx.Graph) -> Optional[PFMarkov]:
-    """
-    Build Demetrius PF-Markov chain from weighted adjacency A (nonnegative).
-    For nonnegative irreducible A:
-        p_ij = a_ij * u_j / (lam * u_i)
-    where u is the right PF eigenvector (A u = lam u).
-
-    Stationary distribution for this P:
-        π_i ∝ u_i * v_i
-    where v is left PF eigenvector (A^T v = lam v).
-
-    Returns PFMarkov with dense P (since sizes in Kodik are typically moderate).
-    """
-    if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
-        return None
-
-    H = G
-    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
-        # collapse multi-edges by summing weights
-        S = nx.DiGraph() if H.is_directed() else nx.Graph()
-        S.add_nodes_from(H.nodes(data=True))
-        for a, b, d in H.edges(data=True):
-            w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except Exception:
-                w = 1.0
-            if w < 0:
-                w = 0.0
-            if S.has_edge(a, b):
-                S[a][b]["weight"] = float(S[a][b].get("weight", 0.0)) + w
-            else:
-                S.add_edge(a, b, weight=w)
-        H = S
-
-    # For undirected graphs: treat as directed both ways (A is symmetric).
-    if not H.is_directed():
-        H = H.to_directed()
-
-    nodes = list(H.nodes())
-    n = len(nodes)
-    idx = {nodes[i]: i for i in range(n)}
-
-    # Build nonnegative weighted adjacency
-    A = nx.adjacency_matrix(H, nodelist=nodes, weight="weight").astype(float).tocsr()
+    # For undirected: treat as directed both ways for A
+    A = nx.adjacency_matrix(H.to_directed(), weight="weight").astype(float).tocsr()
     if A.nnz == 0:
-        return None
-
-    # Ensure nonnegativity
-    if A.data.size > 0:
+        return float("nan")
+    if A.data.size:
         A.data = np.maximum(A.data, 0.0)
 
-    lam, u, v = _largest_pf_eigs(A)
+    try:
+        lam, u, v = _pf_eigs_sparse(A)
+    except Exception:
+        # dense fallback for tiny graphs
+        Ad = A.toarray()
+        vals, vecs = np.linalg.eig(Ad)
+        lam = float(np.real(vals[np.argmax(np.real(vals))]))
+        u = np.real(vecs[:, np.argmax(np.real(vals))])
+        vals2, vecs2 = np.linalg.eig(Ad.T)
+        v = np.real(vecs2[:, np.argmax(np.real(vals2))])
 
     if not np.isfinite(lam) or lam <= 0:
-        return None
+        return float("nan")
 
-    # Make u, v positive (sign ambiguity)
     u = np.abs(u) + 1e-15
     v = np.abs(v) + 1e-15
 
-    # Build P_ij = a_ij * u_j / (lam * u_i)
+    n = A.shape[0]
     P = np.zeros((n, n), dtype=float)
     A_coo = A.tocoo()
     for i, j, aij in zip(A_coo.row, A_coo.col, A_coo.data):
@@ -419,33 +347,13 @@ def demetrius_pf_markov(G: nx.Graph) -> Optional[PFMarkov]:
             continue
         P[i, j] += float(aij) * float(u[j]) / (float(lam) * float(u[i]))
 
-    # Row-normalize defensively (should already be stochastic if irreducible)
     row_sums = P.sum(axis=1)
     for i in range(n):
         s = float(row_sums[i])
         if s > 0:
             P[i, :] /= s
         else:
-            # dead row -> uniform (rare); keeps chain defined
             P[i, :] = 1.0 / n
-
-    return PFMarkov(nodes=nodes, lam=float(lam), u=u, v=v, P=P)
-
-
-def evolutionary_entropy_demetrius(G: nx.Graph, *, base: float = math.e) -> float:
-    """
-    Demetrius evolutionary entropy as entropy rate of PF-Markov chain.
-
-    H_evo = - Σ_i π_i Σ_j P_ij log(P_ij)
-    with π_i ∝ u_i v_i (PF left/right eigenvectors of A).
-    """
-    mk = demetrius_pf_markov(G)
-    if mk is None:
-        return float("nan")
-
-    u = mk.u
-    v = mk.v
-    P = mk.P
 
     pi = u * v
     Z = float(pi.sum())
@@ -453,18 +361,14 @@ def evolutionary_entropy_demetrius(G: nx.Graph, *, base: float = math.e) -> floa
         return float("nan")
     pi = pi / Z
 
-    log = math.log
-    log_base = log(base)
-
-    # entropy rate
-    H = 0.0
-    for i in range(P.shape[0]):
+    log_base = math.log(base)
+    H_evo = 0.0
+    for i in range(n):
         row = P[i, :]
-        # -Σ p log p
         mask = row > 0
         if not np.any(mask):
             continue
         h_i = -float(np.sum(row[mask] * (np.log(row[mask]) / log_base)))
-        H += float(pi[i]) * h_i
+        H_evo += float(pi[i]) * h_i
 
-    return float(H)
+    return float(H_evo)
