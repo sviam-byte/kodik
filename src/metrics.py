@@ -9,6 +9,7 @@ from networkx.algorithms.community import modularity, louvain_communities
 
 from src.robust_geom import (
     network_entropy_rate,
+    evolutionary_entropy_demetrius,
     ollivier_ricci_summary,
     fragility_from_entropy,
     fragility_from_curvature,
@@ -27,167 +28,175 @@ def add_dist_attr(G: nx.Graph) -> nx.Graph:
     return H
 
 
-def _shannon_entropy_from_counts(counts: np.ndarray) -> float:
-    """Shannon entropy H = -sum p log2 p for a nonnegative count vector."""
-    counts = np.asarray(counts, dtype=float)
-    counts = counts[np.isfinite(counts)]
-    counts = counts[counts > 0]
-    if counts.size == 0:
-        return float("nan")
-    p = counts / counts.sum()
-    return float(-(p * np.log2(p)).sum())
-
-
-def _shannon_entropy_from_values(values, bins: int = 32) -> float:
-    """Histogram-based Shannon entropy for a list/array of real values."""
-    xs = np.asarray(list(values), dtype=float)
-    xs = xs[np.isfinite(xs)]
-    if xs.size == 0:
-        return float("nan")
-    # If all equal -> entropy 0 (single bin effectively).
-    if float(xs.min()) == float(xs.max()):
-        return 0.0
-    hist, _ = np.histogram(xs, bins=int(max(2, bins)))
-    return _shannon_entropy_from_counts(hist)
-
-
-def approx_weighted_efficiency(G: nx.Graph, sources_k: int, seed: int) -> float:
-    """
-    E_w = (1/(N(N-1))) * sum_{i!=j} 1/d_ij, dist = 1/weight
-    """
-    N = G.number_of_nodes()
-    if N < 2:
-        return 0.0
-
-    H = add_dist_attr(G)
-    nodes = list(H.nodes())
-    rng = random.Random(int(seed))
-
-    k = min(int(sources_k), N)
-    sources = nodes if k == N else rng.sample(nodes, k)
-
-    denom = N * (N - 1)
-    total = 0.0
-    for s in sources:
-        dist = nx.single_source_dijkstra_path_length(H, s, weight="dist")
-        acc = 0.0
-        for t, d in dist.items():
-            if t == s:
-                continue
-            if d > 0 and np.isfinite(d):
-                acc += 1.0 / d
-        total += acc
-
-    est_full_sum = total * (N / max(1, k))
-    return float(est_full_sum / denom)
-
-
 def spectral_radius_weighted_adjacency(G: nx.Graph) -> float:
-    """Return largest eigenvalue of weighted adjacency matrix."""
-    if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
+    """Largest eigenvalue of weighted adjacency (Perron-Frobenius radius)."""
+    if G.number_of_nodes() == 0 or G.number_of_edges() == 0:
         return 0.0
-    A = nx.adjacency_matrix(G, weight="weight").astype(float)
     try:
-        v = spla.eigsh(A, k=1, which="LM", return_eigenvectors=False)[0]
-        return float(v)
-    except Exception:
-        return 0.0
-
-
-def lambda2_robust_connected(G: nx.Graph, eps: float = 1e-10) -> float:
-    """
-    λ2 для связного графа .
-    """
-    n = G.number_of_nodes()
-    m = G.number_of_edges()
-    if n < 3 or m == 0:
-        return 0.0
-    if not nx.is_connected(G):
-        return 0.0
-
-    L = nx.laplacian_matrix(G, weight="weight").astype(float)
-
-    if n <= 500:
-        vals = np.linalg.eigvalsh(L.toarray())
-        vals = np.sort(vals)
-        for v in vals:
-            if v > eps:
-                return float(v)
-        return 0.0
-
-    try:
-        vals = spla.eigsh(L, k=6, sigma=0.0, which="LM", return_eigenvectors=False)
-        vals = np.sort(np.real(vals))
-        for v in vals:
-            if v > eps:
-                return float(v)
-        return 0.0
+        A = nx.adjacency_matrix(G, weight="weight").astype(float)
+        # Use sparse eigs for largest magnitude eigenvalue
+        vals = spla.eigs(A, k=1, which="LR", return_eigenvectors=False)
+        lmax = float(np.real(vals[0]))
+        return max(0.0, lmax)
     except Exception:
         try:
-            vals = spla.eigsh(L, k=6, which="SM", return_eigenvectors=False)
-            vals = np.sort(np.real(vals))
-            for v in vals:
-                if v > eps:
-                    return float(v)
-            return 0.0
+            A = nx.to_numpy_array(G, weight="weight", dtype=float)
+            vals = np.linalg.eigvals(A)
+            lmax = float(np.max(np.real(vals)))
+            return max(0.0, lmax)
         except Exception:
             return 0.0
 
 
 def lambda2_on_lcc(G: nx.Graph) -> float:
-    if G.number_of_nodes() < 3 or G.number_of_edges() == 0:
+    """Second-smallest eigenvalue of normalized Laplacian on LCC (undirected)."""
+    if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
         return 0.0
-    if not nx.is_connected(G):
-        return 0.0
-    return lambda2_robust_connected(G)
+    if G.is_directed():
+        # For directed, use undirected view for this proxy.
+        H = G.to_undirected(as_view=False)
+    else:
+        H = G
 
-
-def compute_modularity_louvain(G: nx.Graph, seed: int) -> float:
-    if G.number_of_nodes() < 3 or G.number_of_edges() == 0:
+    comps = list(nx.connected_components(H))
+    if not comps:
         return 0.0
+    lcc = max(comps, key=len)
+    if len(lcc) < 2:
+        return 0.0
+
+    Hs = H.subgraph(lcc).copy()
     try:
-        comm = louvain_communities(G, weight="weight", seed=int(seed))
-        return float(modularity(G, comm, weight="weight"))
-    except TypeError:
-        comm = louvain_communities(G, weight="weight")
-        return float(modularity(G, comm, weight="weight"))
+        L = nx.normalized_laplacian_matrix(Hs, weight="weight").astype(float)
+        vals = spla.eigs(L, k=min(3, L.shape[0] - 1), which="SR", return_eigenvectors=False)
+        vals = np.sort(np.real(vals))
+        if vals.size >= 2:
+            return float(max(0.0, vals[1]))
+        return 0.0
+    except Exception:
+        try:
+            L = nx.normalized_laplacian_matrix(Hs, weight="weight").toarray().astype(float)
+            vals = np.sort(np.real(np.linalg.eigvals(L)))
+            if vals.size >= 2:
+                return float(max(0.0, vals[1]))
+            return 0.0
+        except Exception:
+            return 0.0
+
+
+def approx_weighted_efficiency(G: nx.Graph, sources_k: int = 32, seed: int = 0) -> float:
+    """Approximate global efficiency using k random sources + Dijkstra on dist=1/weight."""
+    N = G.number_of_nodes()
+    if N < 2 or G.number_of_edges() == 0:
+        return 0.0
+
+    H = add_dist_attr(G)
+    rng = random.Random(int(seed))
+    nodes = list(H.nodes())
+    k = min(int(sources_k), len(nodes))
+    if k <= 0:
+        return 0.0
+    sources = rng.sample(nodes, k)
+
+    inv_sum = 0.0
+    cnt = 0
+    for s in sources:
+        dists = nx.single_source_dijkstra_path_length(H, s, weight="dist")
+        for t, d in dists.items():
+            if s == t:
+                continue
+            if d and np.isfinite(d) and d > 0:
+                inv_sum += 1.0 / float(d)
+                cnt += 1
+    return float(inv_sum / cnt) if cnt > 0 else 0.0
+
+
+def compute_modularity_louvain(G: nx.Graph, seed: int = 0) -> float:
+    """Louvain modularity (undirected view for directed graphs)."""
+    if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
+        return 0.0
+    H = G.to_undirected(as_view=False) if G.is_directed() else G
+    try:
+        parts = louvain_communities(H, weight="weight", seed=int(seed))
+        return float(modularity(H, parts, weight="weight"))
     except Exception:
         return 0.0
 
 
 def degree_entropy(G: nx.Graph) -> float:
-    """
-    Энтропия распределения степеней 
-    """
-    n = G.number_of_nodes()
-    if n == 0:
+    """Entropy of degree distribution (unweighted degrees)."""
+    N = G.number_of_nodes()
+    if N == 0:
         return 0.0
     degs = np.array([d for _, d in G.degree()], dtype=float)
-    if degs.sum() <= 0:
+    if degs.size == 0:
         return 0.0
-    p = degs / degs.sum()
+    vals, counts = np.unique(degs, return_counts=True)
+    p = counts.astype(float) / float(counts.sum())
     p = p[p > 0]
-    return float(-(p * np.log(p)).sum())
+    return float(-np.sum(p * np.log(p))) if p.size > 0 else 0.0
 
 
-def approx_diameter_lcc(G: nx.Graph, seed: int = 42, samples: int = 16) -> int | None:
-    """
-    BFS от нескольких случайных узлов
-    """
-    if G.number_of_nodes() < 2:
+def approx_diameter_lcc(G: nx.Graph, seed: int = 0, samples: int = 16):
+    """Approximate diameter on LCC using double-sweep BFS from random seeds."""
+    if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
+        return None
+    H = G.to_undirected(as_view=False) if G.is_directed() else G
+
+    comps = list(nx.connected_components(H))
+    if not comps:
+        return None
+    lcc = max(comps, key=len)
+    if len(lcc) < 2:
         return 0
-    nodes = list(G.nodes())
+    S = H.subgraph(lcc).copy()
+
     rng = random.Random(int(seed))
-    k = min(samples, len(nodes))
-    picks = rng.sample(nodes, k)
+    nodes = list(S.nodes())
+    if not nodes:
+        return None
+    k = min(int(samples), len(nodes))
+    starts = rng.sample(nodes, k)
+
     best = 0
-    for s in picks:
-        dist = nx.single_source_shortest_path_length(G, s)
-        if dist:
-            best = max(best, max(dist.values()))
+    for s in starts:
+        d1 = nx.single_source_shortest_path_length(S, s)
+        if not d1:
+            continue
+        u = max(d1, key=d1.get)
+        d2 = nx.single_source_shortest_path_length(S, u)
+        if not d2:
+            continue
+        diam = max(d2.values())
+        if diam > best:
+            best = diam
     return int(best)
 
 
+def _shannon_entropy_from_counts(counts: np.ndarray) -> float:
+    counts = np.asarray(counts, dtype=float)
+    s = float(np.sum(counts))
+    if s <= 0:
+        return float("nan")
+    p = counts / s
+    p = p[p > 0]
+    if p.size == 0:
+        return float("nan")
+    return float(-np.sum(p * np.log(p)))
+
+
+def _shannon_entropy_from_values(values, bins: int = 32) -> float:
+    xs = np.asarray(values, dtype=float)
+    xs = xs[np.isfinite(xs)]
+    if xs.size == 0:
+        return float("nan")
+    hist, _ = np.histogram(xs, bins=int(bins))
+    return _shannon_entropy_from_counts(hist)
+
+
+# =========================
+# Metrics
+# =========================
 def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
     N = G.number_of_nodes()
     E = G.number_of_edges()
@@ -265,6 +274,12 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
     except Exception:
         H_rw = float("nan")
 
+    # Demetrius evolutionary entropy (PF-Markov)
+    try:
+        H_evo = float(evolutionary_entropy_demetrius(G, base=math.e))
+    except Exception:
+        H_evo = float("nan")
+
     try:
         curv = ollivier_ricci_summary(
             G,
@@ -287,6 +302,7 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
         kappa_skipped_edges = 0
 
     frag_H = float(fragility_from_entropy(H_rw)) if np.isfinite(H_rw) else float("nan")
+    frag_evo = float(fragility_from_entropy(H_evo)) if np.isfinite(H_evo) else float("nan")
     frag_k = (
         float(fragility_from_curvature(kappa_mean)) if np.isfinite(kappa_mean) else float("nan")
     )
@@ -319,12 +335,14 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
 
         # NEW keys (front-ready)
         "H_rw": float(H_rw) if np.isfinite(H_rw) else float("nan"),
+        "H_evo": float(H_evo) if np.isfinite(H_evo) else float("nan"),
         "kappa_mean": float(kappa_mean) if np.isfinite(kappa_mean) else float("nan"),
         "kappa_median": float(kappa_median) if np.isfinite(kappa_median) else float("nan"),
         "kappa_frac_negative": float(kappa_frac_negative) if np.isfinite(kappa_frac_negative) else float("nan"),
         "kappa_computed_edges": int(kappa_computed_edges),
         "kappa_skipped_edges": int(kappa_skipped_edges),
         "fragility_H": float(frag_H) if np.isfinite(frag_H) else float("nan"),
+        "fragility_evo": float(frag_evo) if np.isfinite(frag_evo) else float("nan"),
         "fragility_kappa": float(frag_k) if np.isfinite(frag_k) else float("nan"),
     }
 
@@ -351,34 +369,49 @@ def make_3d_traces(G: nx.Graph, pos3d: dict, show_scale: bool = False):
     ys = [pos3d[n][1] for n in nodes]
     zs = [pos3d[n][2] for n in nodes]
     colors = [strength.get(n, 0.0) for n in nodes]
-    texts = [f"{n}: strength={strength.get(n, 0.0):.3f}" for n in nodes]
+    texts = [
+        f"{str(n)}<br>strength={strength.get(n, 0.0):.3g}"
+        for n in nodes
+    ]
 
     node_trace = go.Scatter3d(
         x=xs,
         y=ys,
         z=zs,
         mode="markers",
-        marker=dict(size=4, color=colors, colorscale="Inferno", showscale=show_scale),
+        marker=dict(
+            size=6,
+            color=colors,
+            colorscale="Viridis",
+            showscale=bool(show_scale),
+            colorbar=dict(title="strength") if show_scale else None,
+        ),
         text=texts,
         hoverinfo="text",
         name="nodes",
     )
 
-    ex, ey, ez = [], [], []
-    for u, v in G.edges():
-        if u not in pos3d or v not in pos3d:
+    # edges
+    ex = []
+    ey = []
+    ez = []
+    ew = []
+    for a, b, d in G.edges(data=True):
+        if a not in pos3d or b not in pos3d:
             continue
-        ex.extend([pos3d[u][0], pos3d[v][0], None])
-        ey.extend([pos3d[u][1], pos3d[v][1], None])
-        ez.extend([pos3d[u][2], pos3d[v][2], None])
+        ex += [pos3d[a][0], pos3d[b][0], None]
+        ey += [pos3d[a][1], pos3d[b][1], None]
+        ez += [pos3d[a][2], pos3d[b][2], None]
+        ew.append(float(d.get("weight", 1.0)))
 
     edge_trace = go.Scatter3d(
         x=ex,
         y=ey,
         z=ez,
         mode="lines",
-        line=dict(color="#444", width=1),
+        line=dict(width=2, color="rgba(150,150,150,0.55)"),
         hoverinfo="none",
         name="edges",
     )
-    return edge_trace, node_trace
+
+    return node_trace, edge_trace
