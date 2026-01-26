@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import random
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import networkx as nx
@@ -19,7 +19,7 @@ def add_dist_attr(G: nx.Graph) -> nx.Graph:
 
 
 # ------------------------------------------------------------
-# 1) Entropy rate of random walk 
+# 1) Entropy rate of random walk
 # ------------------------------------------------------------
 def network_entropy_rate(G: nx.Graph, *, base: float = math.e) -> float:
     """
@@ -72,7 +72,7 @@ def network_entropy_rate(G: nx.Graph, *, base: float = math.e) -> float:
 
 
 # ------------------------------------------------------------
-# 2) Ollivier–Ricci curvature 
+# 2) Ollivier–Ricci curvature
 # ------------------------------------------------------------
 def _one_step_measure(H: nx.Graph, x) -> Dict:
     """µ_x(y) for neighbors y, proportional to w_xy."""
@@ -301,3 +301,170 @@ def fragility_from_curvature(kappa_mean: float, eps: float = 1e-9) -> float:
     if not np.isfinite(kappa_mean):
         return float("nan")
     return float(1.0 / max(eps, 1.0 + float(kappa_mean)))
+
+
+# ------------------------------------------------------------
+# 4) Demetrius evolutionary entropy (PF-Markov construction)
+# ------------------------------------------------------------
+@dataclass
+class PFMarkov:
+    nodes: List
+    lam: float
+    u: np.ndarray          # right PF eigenvector (positive)
+    v: np.ndarray          # left PF eigenvector (positive)
+    P: "np.ndarray"        # dense transition matrix (row-stochastic)
+
+
+def _largest_pf_eigs(A_csr):
+    """
+    Return (lam, u_right, v_left) for a nonnegative matrix A (sparse).
+    Uses scipy if available; falls back to numpy (dense) for tiny graphs.
+    """
+    n = A_csr.shape[0]
+    # Try sparse eigs first
+    try:
+        import scipy.sparse.linalg as spla
+
+        # Right eigenvector of A
+        vals_r, vecs_r = spla.eigs(A_csr, k=1, which="LR")
+        lam = float(np.real(vals_r[0]))
+        u = np.real(vecs_r[:, 0])
+
+        # Left eigenvector = right eigenvector of A^T
+        vals_l, vecs_l = spla.eigs(A_csr.T, k=1, which="LR")
+        v = np.real(vecs_l[:, 0])
+
+        return lam, u, v
+    except Exception:
+        # Dense fallback (small n)
+        A = A_csr.toarray().astype(float)
+        vals, vecs = np.linalg.eig(A)
+        idx = int(np.argmax(np.real(vals)))
+        lam = float(np.real(vals[idx]))
+        u = np.real(vecs[:, idx])
+
+        vals2, vecs2 = np.linalg.eig(A.T)
+        idx2 = int(np.argmax(np.real(vals2)))
+        v = np.real(vecs2[:, idx2])
+
+        return lam, u, v
+
+
+def demetrius_pf_markov(G: nx.Graph) -> Optional[PFMarkov]:
+    """
+    Build Demetrius PF-Markov chain from weighted adjacency A (nonnegative).
+    For nonnegative irreducible A:
+        p_ij = a_ij * u_j / (lam * u_i)
+    where u is the right PF eigenvector (A u = lam u).
+
+    Stationary distribution for this P:
+        π_i ∝ u_i * v_i
+    where v is left PF eigenvector (A^T v = lam v).
+
+    Returns PFMarkov with dense P (since sizes in Kodik are typically moderate).
+    """
+    if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
+        return None
+
+    H = G
+    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
+        # collapse multi-edges by summing weights
+        S = nx.DiGraph() if H.is_directed() else nx.Graph()
+        S.add_nodes_from(H.nodes(data=True))
+        for a, b, d in H.edges(data=True):
+            w = d.get("weight", 1.0)
+            try:
+                w = float(w)
+            except Exception:
+                w = 1.0
+            if w < 0:
+                w = 0.0
+            if S.has_edge(a, b):
+                S[a][b]["weight"] = float(S[a][b].get("weight", 0.0)) + w
+            else:
+                S.add_edge(a, b, weight=w)
+        H = S
+
+    # For undirected graphs: treat as directed both ways (A is symmetric).
+    if not H.is_directed():
+        H = H.to_directed()
+
+    nodes = list(H.nodes())
+    n = len(nodes)
+    idx = {nodes[i]: i for i in range(n)}
+
+    # Build nonnegative weighted adjacency
+    A = nx.adjacency_matrix(H, nodelist=nodes, weight="weight").astype(float).tocsr()
+    if A.nnz == 0:
+        return None
+
+    # Ensure nonnegativity
+    if A.data.size > 0:
+        A.data = np.maximum(A.data, 0.0)
+
+    lam, u, v = _largest_pf_eigs(A)
+
+    if not np.isfinite(lam) or lam <= 0:
+        return None
+
+    # Make u, v positive (sign ambiguity)
+    u = np.abs(u) + 1e-15
+    v = np.abs(v) + 1e-15
+
+    # Build P_ij = a_ij * u_j / (lam * u_i)
+    P = np.zeros((n, n), dtype=float)
+    A_coo = A.tocoo()
+    for i, j, aij in zip(A_coo.row, A_coo.col, A_coo.data):
+        if aij <= 0:
+            continue
+        P[i, j] += float(aij) * float(u[j]) / (float(lam) * float(u[i]))
+
+    # Row-normalize defensively (should already be stochastic if irreducible)
+    row_sums = P.sum(axis=1)
+    for i in range(n):
+        s = float(row_sums[i])
+        if s > 0:
+            P[i, :] /= s
+        else:
+            # dead row -> uniform (rare); keeps chain defined
+            P[i, :] = 1.0 / n
+
+    return PFMarkov(nodes=nodes, lam=float(lam), u=u, v=v, P=P)
+
+
+def evolutionary_entropy_demetrius(G: nx.Graph, *, base: float = math.e) -> float:
+    """
+    Demetrius evolutionary entropy as entropy rate of PF-Markov chain.
+
+    H_evo = - Σ_i π_i Σ_j P_ij log(P_ij)
+    with π_i ∝ u_i v_i (PF left/right eigenvectors of A).
+    """
+    mk = demetrius_pf_markov(G)
+    if mk is None:
+        return float("nan")
+
+    u = mk.u
+    v = mk.v
+    P = mk.P
+
+    pi = u * v
+    Z = float(pi.sum())
+    if not np.isfinite(Z) or Z <= 0:
+        return float("nan")
+    pi = pi / Z
+
+    log = math.log
+    log_base = log(base)
+
+    # entropy rate
+    H = 0.0
+    for i in range(P.shape[0]):
+        row = P[i, :]
+        # -Σ p log p
+        mask = row > 0
+        if not np.any(mask):
+            continue
+        h_i = -float(np.sum(row[mask] * (np.log(row[mask]) / log_base)))
+        H += float(pi[i]) * h_i
+
+    return float(H)
