@@ -7,6 +7,13 @@ import plotly.graph_objects as go
 
 from networkx.algorithms.community import modularity, louvain_communities
 
+from src.robust_geom import (
+    network_entropy_rate,
+    ollivier_ricci_summary,
+    fragility_from_entropy,
+    fragility_from_curvature,
+)
+
 
 # -------------------------
 # Helpers
@@ -47,7 +54,6 @@ def _shannon_entropy_from_values(values, bins: int = 32) -> float:
 def approx_weighted_efficiency(G: nx.Graph, sources_k: int, seed: int) -> float:
     """
     E_w = (1/(N(N-1))) * sum_{i!=j} 1/d_ij, dist = 1/weight
-    Аппрокс по k источникам: k Dijkstra вместо N Dijkstra.
     """
     N = G.number_of_nodes()
     if N < 2:
@@ -76,7 +82,6 @@ def approx_weighted_efficiency(G: nx.Graph, sources_k: int, seed: int) -> float:
     return float(est_full_sum / denom)
 
 
-
 def spectral_radius_weighted_adjacency(G: nx.Graph) -> float:
     """Return largest eigenvalue of weighted adjacency matrix."""
     if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
@@ -91,9 +96,7 @@ def spectral_radius_weighted_adjacency(G: nx.Graph) -> float:
 
 def lambda2_robust_connected(G: nx.Graph, eps: float = 1e-10) -> float:
     """
-    λ2 для связного графа (взвешенный лапласиан).
-    Малые графы -> dense eigvalsh (точно).
-    Большие -> sparse eigsh около 0.
+    λ2 для связного графа .
     """
     n = G.number_of_nodes()
     m = G.number_of_edges()
@@ -132,17 +135,14 @@ def lambda2_robust_connected(G: nx.Graph, eps: float = 1e-10) -> float:
 
 
 def lambda2_on_lcc(G: nx.Graph) -> float:
-    """Return algebraic connectivity for a (connected) LCC graph."""
     if G.number_of_nodes() < 3 or G.number_of_edges() == 0:
         return 0.0
-    # assume already LCC or connected-ish
     if not nx.is_connected(G):
         return 0.0
     return lambda2_robust_connected(G)
 
 
 def compute_modularity_louvain(G: nx.Graph, seed: int) -> float:
-    """Compute Louvain modularity with version-safe seed handling."""
     if G.number_of_nodes() < 3 or G.number_of_edges() == 0:
         return 0.0
     try:
@@ -157,8 +157,7 @@ def compute_modularity_louvain(G: nx.Graph, seed: int) -> float:
 
 def degree_entropy(G: nx.Graph) -> float:
     """
-    Энтропия распределения степеней (weighted degree strength тоже можно).
-    Здесь: обычная степень.
+    Энтропия распределения степеней 
     """
     n = G.number_of_nodes()
     if n == 0:
@@ -173,8 +172,7 @@ def degree_entropy(G: nx.Graph) -> float:
 
 def approx_diameter_lcc(G: nx.Graph, seed: int = 42, samples: int = 16) -> int | None:
     """
-    Дешёвая оценка диаметра: BFS от нескольких случайных узлов.
-    Возвращает максимум найденных эксцентриситетов.
+    BFS от нескольких случайных узлов
     """
     if G.number_of_nodes() < 2:
         return 0
@@ -191,7 +189,6 @@ def approx_diameter_lcc(G: nx.Graph, seed: int = 42, samples: int = 16) -> int |
 
 
 def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
-    """Compute a suite of scalar metrics for analysis dashboards."""
     N = G.number_of_nodes()
     E = G.number_of_edges()
     if N > 0:
@@ -253,7 +250,6 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
     H_w = _shannon_entropy_from_values(ws, bins=32) if ws else float("nan")
     H_conf = _shannon_entropy_from_values(cs, bins=32) if cs else float("nan")
 
-    # Redundancy β (cycle fraction proxy).
     if E > 0:
         beta_red = (E - (N - C)) / float(E)
     else:
@@ -262,6 +258,38 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
     # Relaxation time τ (diffusion-like proxy).
     tau_relax = (1.0 / l2) if (l2 and np.isfinite(l2) and l2 > 1e-12) else float("nan")
     epi_thr = (1.0 / lmax) if (lmax and np.isfinite(lmax) and lmax > 1e-12) else float("nan")
+
+    # ----------------------------Robust geometry (additive; safe defaults)
+    try:
+        H_rw = float(network_entropy_rate(G, base=math.e))
+    except Exception:
+        H_rw = float("nan")
+
+    try:
+        curv = ollivier_ricci_summary(
+            G,
+            sample_edges=150,
+            seed=int(seed),
+            max_support=60,
+            cutoff=8.0,
+            scale=200_000,
+        )
+        kappa_mean = float(curv.kappa_mean)
+        kappa_median = float(curv.kappa_median)
+        kappa_frac_negative = float(curv.kappa_frac_negative)
+        kappa_computed_edges = int(curv.computed_edges)
+        kappa_skipped_edges = int(curv.skipped_edges)
+    except Exception:
+        kappa_mean = float("nan")
+        kappa_median = float("nan")
+        kappa_frac_negative = float("nan")
+        kappa_computed_edges = 0
+        kappa_skipped_edges = 0
+
+    frag_H = float(fragility_from_entropy(H_rw)) if np.isfinite(H_rw) else float("nan")
+    frag_k = (
+        float(fragility_from_curvature(kappa_mean)) if np.isfinite(kappa_mean) else float("nan")
+    )
 
     return {
         "N": N,
@@ -288,6 +316,16 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
         "assortativity": float(assort) if np.isfinite(assort) else 0.0,
         "clustering": float(clust) if np.isfinite(clust) else 0.0,
         "diameter_approx": int(diam) if diam is not None else None,
+
+        # NEW keys (front-ready)
+        "H_rw": float(H_rw) if np.isfinite(H_rw) else float("nan"),
+        "kappa_mean": float(kappa_mean) if np.isfinite(kappa_mean) else float("nan"),
+        "kappa_median": float(kappa_median) if np.isfinite(kappa_median) else float("nan"),
+        "kappa_frac_negative": float(kappa_frac_negative) if np.isfinite(kappa_frac_negative) else float("nan"),
+        "kappa_computed_edges": int(kappa_computed_edges),
+        "kappa_skipped_edges": int(kappa_skipped_edges),
+        "fragility_H": float(frag_H) if np.isfinite(frag_H) else float("nan"),
+        "fragility_kappa": float(frag_k) if np.isfinite(frag_k) else float("nan"),
     }
 
 
