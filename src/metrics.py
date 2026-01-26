@@ -1,10 +1,13 @@
 # src/metrics.py
 import math
 import random
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import networkx as nx
 import scipy.sparse.linalg as spla
 import plotly.graph_objects as go
+import plotly.colors as pc
 
 from networkx.algorithms.community import modularity, louvain_communities
 
@@ -325,10 +328,245 @@ def compute_3d_layout(G: nx.Graph, seed: int) -> dict:
     return nx.spring_layout(G, dim=3, weight="weight", seed=int(seed))
 
 
-def make_3d_traces(G: nx.Graph, pos3d: dict, show_scale: bool = False, kappa_edges_max: int = 220):
+def _as_undirected_simple(G: nx.Graph) -> nx.Graph:
+    """Normalize to a simple undirected graph with numeric weights."""
+    H = G
+    if hasattr(H, "is_directed") and H.is_directed():
+        H = H.to_undirected(as_view=False)
+
+    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
+        S = nx.Graph()
+        S.add_nodes_from(H.nodes(data=True))
+        for u, v, d in H.edges(data=True):
+            w = d.get("weight", 1.0)
+            try:
+                w = float(w)
+            except Exception:
+                w = 1.0
+            if S.has_edge(u, v):
+                S[u][v]["weight"] = float(S[u][v].get("weight", 0.0)) + w
+            else:
+                S.add_edge(u, v, weight=w)
+        H = S
+    else:
+        H = nx.Graph(H)
+
+    for _, _, d in H.edges(data=True):
+        w = d.get("weight", 1.0)
+        try:
+            w = float(w)
+        except Exception:
+            w = 1.0
+        if not np.isfinite(w) or w <= 0:
+            w = 1.0
+        d["weight"] = w
+    return H
+
+
+def _rw_transition_matrix(G: nx.Graph, nodes: List) -> np.ndarray:
+    """Row-stochastic transition matrix for a weighted random walk."""
+    n = len(nodes)
+    idx = {nodes[i]: i for i in range(n)}
+    P = np.zeros((n, n), dtype=float)
+    for u in nodes:
+        i = idx[u]
+        nbrs = list(G.neighbors(u))
+        if not nbrs:
+            P[i, i] = 1.0
+            continue
+        js = []
+        ws = []
+        for v in nbrs:
+            w = float(G[u][v].get("weight", 1.0))
+            js.append(idx[v])
+            ws.append(w)
+        s = float(np.sum(ws))
+        if s <= 0:
+            P[i, i] = 1.0
+        else:
+            for w, j in zip(ws, js):
+                P[i, j] = w / s
+    return P
+
+
+def _pf_markov(G: nx.Graph, nodes: List, iters: int = 2000, tol: float = 1e-10) -> Tuple[np.ndarray, np.ndarray]:
+    """PF-Markov (Demetrius-style) transition matrix from Perron-Frobenius structure."""
+    n = len(nodes)
+    idx = {nodes[i]: i for i in range(n)}
+    A = np.zeros((n, n), dtype=float)
+    for u, v, d in G.edges(data=True):
+        i = idx[u]
+        j = idx[v]
+        w = float(d.get("weight", 1.0))
+        A[i, j] += w
+        A[j, i] += w
+
+    x = np.ones(n, dtype=float) / max(1, n)
+    lam_old = 0.0
+    for _ in range(int(max(10, iters))):
+        y = A @ x
+        norm = float(np.linalg.norm(y))
+        if norm == 0:
+            break
+        x = y / norm
+        lam = float((x @ (A @ x)) / max(1e-12, (x @ x)))
+        if abs(lam - lam_old) < tol:
+            break
+        lam_old = lam
+
+    v = np.abs(x) + 1e-15
+    lam = float((v @ (A @ v)) / max(1e-12, (v @ v)))
+    if not np.isfinite(lam) or lam <= 0:
+        P = _rw_transition_matrix(G, nodes)
+        pi = np.ones(n, dtype=float) / max(1, n)
+        return P, pi
+
+    P = np.zeros((n, n), dtype=float)
+    for i in range(n):
+        denom = lam * v[i]
+        if denom <= 0:
+            P[i, i] = 1.0
+            continue
+        row = (A[i, :] * v) / denom
+        rs = float(row.sum())
+        if rs <= 0:
+            P[i, i] = 1.0
+        else:
+            P[i, :] = row / rs
+
+    pi_raw = v * v
+    pi = pi_raw / max(1e-12, float(pi_raw.sum()))
+    return P, pi
+
+
+def compute_energy_flow(
+    G: nx.Graph,
+    steps: int = 20,
+    flow_mode: str = "rw",
+    damping: float = 1.0,
+    sources: Optional[List] = None,
+) -> Tuple[Dict, Dict[Tuple, float]]:
+    """Simulate energy diffusion and return node energies + edge flux values.
+
+    Notes:
+        - Uses dense matrices; prefer modest graph sizes for interactive 3D usage.
+        - If sources are not provided, we seed energy at the highest-strength node.
+    """
+    H = _as_undirected_simple(G)
+    nodes = list(H.nodes())
+    if not nodes:
+        return {}, {}
+
+    if sources:
+        srcs = [s for s in sources if s in H]
+    else:
+        srcs = []
+    if not srcs:
+        strengths = dict(H.degree(weight="weight"))
+        srcs = [max(strengths, key=strengths.get)]
+
+    steps = int(max(0, steps))
+
+    if str(flow_mode).lower().startswith("evo"):
+        P, _pi = _pf_markov(H, nodes)
+    else:
+        P = _rw_transition_matrix(H, nodes)
+
+    n = len(nodes)
+    idx = {nodes[i]: i for i in range(n)}
+    e = np.zeros(n, dtype=float)
+    for s in srcs:
+        e[idx[s]] += 1.0 / len(srcs)
+
+    damp = float(damping)
+    if not np.isfinite(damp):
+        damp = 1.0
+    damp = max(0.0, min(1.0, damp))
+
+    for _ in range(steps):
+        e = e @ P
+        if damp != 1.0:
+            e *= damp
+
+    node_energy = {nodes[i]: float(e[i]) for i in range(n)}
+
+    edge_flux: Dict[Tuple, float] = {}
+    for u, v in H.edges():
+        iu = idx[u]
+        iv = idx[v]
+        f_uv = float(e[iu] * P[iu, iv])
+        f_vu = float(e[iv] * P[iv, iu])
+        edge_flux[(u, v)] = max(f_uv, f_vu)
+
+    return node_energy, edge_flux
+
+
+def _build_edge_overlay_traces(
+    pos3d: dict,
+    edge_values: Dict[Tuple, float],
+    nbins: int = 7,
+) -> List[go.Scatter3d]:
+    """Build colored edge traces by binning edge_values into nbins."""
+    if not edge_values:
+        return []
+
+    vals = list(edge_values.values())
+    vmin, vmax = float(np.min(vals)), float(np.max(vals))
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+        vmin, vmax = vmin - 1.0, vmax + 1.0
+
+    bins = np.linspace(vmin, vmax, int(max(2, nbins)) + 1)
+    colors = pc.sample_colorscale(
+        "Viridis",
+        [i / max(1, (len(bins) - 2)) for i in range(len(bins) - 1)],
+    )
+
+    traces: List[go.Scatter3d] = []
+    for bi in range(len(bins) - 1):
+        lo, hi = bins[bi], bins[bi + 1]
+        xs, ys, zs = [], [], []
+        for (u, v), val in edge_values.items():
+            if u not in pos3d or v not in pos3d:
+                continue
+            if (val >= lo and val < hi) or (bi == len(bins) - 2 and val <= hi):
+                x0, y0, z0 = pos3d[u]
+                x1, y1, z1 = pos3d[v]
+                xs.extend([x0, x1, None])
+                ys.extend([y0, y1, None])
+                zs.extend([z0, z1, None])
+        if xs:
+            traces.append(
+                go.Scatter3d(
+                    x=xs,
+                    y=ys,
+                    z=zs,
+                    mode="lines",
+                    line=dict(color=colors[bi], width=2),
+                    hoverinfo="none",
+                    showlegend=False,
+                )
+            )
+    return traces
+
+
+def make_3d_traces(
+    G: nx.Graph,
+    pos3d: dict,
+    show_scale: bool = False,
+    kappa_edges_max: int = 220,
+    edge_overlay: str = "ricci",
+    flow_mode: str = "rw",
+):
     """
     Returns (edge_traces, node_trace).
     edge_traces is a list: [base_grey_edges, neg_kappa_edges, pos_kappa_edges].
+
+    edge_overlay:
+      - 'ricci' (default): κ<0 red / κ>0 green
+      - 'flux': stationary edge flux overlay
+      - 'weight': edge weight overlay (log10)
+      - 'confidence': edge confidence overlay
+      - 'none': base grey edges only
     """
     if G.number_of_nodes() == 0:
         return [], None
@@ -374,8 +612,45 @@ def make_3d_traces(G: nx.Graph, pos3d: dict, show_scale: bool = False, kappa_edg
         name="edges",
     )
 
-    # compute κ on a sample of edges and overlay colored subsets
+    overlay_mode = str(edge_overlay or "ricci").lower()
+    if overlay_mode == "none":
+        return [base_edges], node_trace
+
+    if overlay_mode in ("weight", "confidence"):
+        edge_values: Dict[Tuple, float] = {}
+        for u, v, d in G.edges(data=True):
+            if u not in pos3d or v not in pos3d:
+                continue
+            if overlay_mode == "confidence":
+                raw = d.get("confidence", 1.0)
+                try:
+                    val = float(raw)
+                except Exception:
+                    val = 1.0
+            else:
+                raw = d.get("weight", 1.0)
+                try:
+                    w = float(raw)
+                except Exception:
+                    w = 1.0
+                w = max(w, 1e-12)
+                val = float(np.log10(w))
+            edge_values[(u, v)] = val
+
+        overlay_traces = _build_edge_overlay_traces(pos3d, edge_values)
+        if overlay_traces:
+            return [base_edges, *overlay_traces], node_trace
+
+    if overlay_mode == "flux":
+        _, edge_flux = compute_energy_flow(G, flow_mode=flow_mode)
+        overlay_traces = _build_edge_overlay_traces(pos3d, edge_flux)
+        if overlay_traces:
+            return [base_edges, *overlay_traces], node_trace
+
+    # Default: compute κ on a sample of edges and overlay colored subsets.
     edges = list(G.edges())
+    if int(kappa_edges_max) <= 0:
+        return [base_edges], node_trace
     if len(edges) > int(kappa_edges_max):
         rng = random.Random(42)
         edges = rng.sample(edges, int(kappa_edges_max))

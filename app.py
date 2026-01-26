@@ -15,8 +15,7 @@ import streamlit as st
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
-from src.metrics import calculate_metrics
-from src.viz import compute_3d_layout, make_3d_traces
+from src.metrics import calculate_metrics, compute_3d_layout, make_3d_traces
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
 from src.attacks import run_attack 
 from src.attacks_mix import run_mix_attack
@@ -949,6 +948,20 @@ with tab_struct:
         if st.button("🔄 Обновить layout seed (анти-кэш)"):
             st.session_state["layout_seed_bump"] = int(st.session_state.get("layout_seed_bump", 0)) + 1
 
+        # Edge overlay options for 3D (coloring by edge-specific metrics).
+        edge_overlay_ui = st.selectbox(
+            "Разметка рёбер",
+            [
+                "Ricci sign (κ<0/κ>0)",
+                "Energy flux (RW)",
+                "Energy flux (Demetrius)",
+                "Weight (log10)",
+                "Confidence",
+                "None",
+            ],
+            index=0,
+        )
+
     with col_vis_main:
         if G_view.number_of_nodes() > 2000:
             st.warning(f"Граф большой ({G_view.number_of_nodes()} узлов). 3D может тормозить.")
@@ -962,8 +975,26 @@ with tab_struct:
         else:
             pos3d = compute_3d_layout(G_view, seed=base_seed)
 
+        edge_overlay = "ricci"
+        flow_mode = "rw"
+        if edge_overlay_ui.startswith("Energy flux"):
+            edge_overlay = "flux"
+            flow_mode = "evo" if "Demetrius" in edge_overlay_ui else "rw"
+        elif edge_overlay_ui.startswith("Weight"):
+            edge_overlay = "weight"
+        elif edge_overlay_ui.startswith("Confidence"):
+            edge_overlay = "confidence"
+        elif edge_overlay_ui.startswith("None"):
+            edge_overlay = "none"
+
         # 2) Всегда строим трэйсы, чтобы 3D работал и для Fixed, и для Recompute.
-        edge_traces, node_trace = make_3d_traces(G_view, pos3d, show_scale=True)
+        edge_traces, node_trace = make_3d_traces(
+            G_view,
+            pos3d,
+            show_scale=True,
+            edge_overlay=edge_overlay,
+            flow_mode=flow_mode,
+        )
 
         # 3) Рисуем внутри col_vis_main, чтобы не ломать сетку.
         if node_trace is not None:
@@ -1356,6 +1387,31 @@ with tab_attack:
                         st.plotly_chart(fig_phase, use_container_width=True)
 
             with tabC:
+                edge_overlay_ui = st.selectbox(
+                    "Разметка рёбер (3D step-by-step)",
+                    [
+                        "Ricci sign (κ<0/κ>0)",
+                        "Energy flux (RW)",
+                        "Energy flux (Demetrius)",
+                        "Weight (log10)",
+                        "Confidence",
+                        "None",
+                    ],
+                    index=0,
+                    key="edge_overlay_tabc",
+                )
+                edge_overlay = "ricci"
+                flow_mode = "rw"
+                if edge_overlay_ui.startswith("Energy flux"):
+                    edge_overlay = "flux"
+                    flow_mode = "evo" if "Demetrius" in edge_overlay_ui else "rw"
+                elif edge_overlay_ui.startswith("Weight"):
+                    edge_overlay = "weight"
+                elif edge_overlay_ui.startswith("Confidence"):
+                    edge_overlay = "confidence"
+                elif edge_overlay_ui.startswith("None"):
+                    edge_overlay = "none"
+
                 base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
                 pos_base = compute_3d_layout(G_view, seed=base_seed)
 
@@ -1382,7 +1438,13 @@ with tab_attack:
                         H.remove_nodes_from([n for n in removed_set if H.has_node(n)])
 
                         pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
-                        edge_traces, node_trace = make_3d_traces(H, pos_k, show_scale=True)
+                        edge_traces, node_trace = make_3d_traces(
+                            H,
+                            pos_k,
+                            show_scale=True,
+                            edge_overlay=edge_overlay,
+                            flow_mode=flow_mode,
+                        )
 
                         if node_trace is not None:
                             fig = go.Figure(data=[*edge_traces, node_trace])
@@ -1423,7 +1485,13 @@ with tab_attack:
                                 H.remove_edge(u, v)
 
                         pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
-                        edge_traces, node_trace = make_3d_traces(H, pos_k, show_scale=True)
+                        edge_traces, node_trace = make_3d_traces(
+                            H,
+                            pos_k,
+                            show_scale=True,
+                            edge_overlay=edge_overlay,
+                            flow_mode=flow_mode,
+                        )
 
                         if node_trace is not None:
                             fig = go.Figure(data=[*edge_traces, node_trace])
