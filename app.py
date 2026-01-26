@@ -961,29 +961,29 @@ with tab_struct:
         else:
             pos3d = compute_3d_layout(G_view, seed=base_seed)
 
-        edge_traces, node_trace = make_3d_traces(G_view, pos3d, show_scale=True)
-
-        if node_trace:
-            node_trace.marker.size = node_size
-            if show_labels:
-                node_trace.mode = "markers+text"
-
-            fig_3d = go.Figure(data=[*edge_traces, node_trace])
-            fig_3d.update_layout(
-                title=f"3D Structure: {active_entry['name']}",
-                template="plotly_dark",
-                showlegend=False,
-                height=820,
-                margin=dict(l=0, r=0, t=30, b=0),
-                scene=dict(
-                    xaxis=dict(showbackground=False, showticklabels=False, title=''),
-                    yaxis=dict(showbackground=False, showticklabels=False, title=''),
-                    zaxis=dict(showbackground=False, showticklabels=False, title=''),
-                )
+            edge_traces, node_trace = make_3d_traces(G_view, pos3d, show_scale=True)
+    
+    if node_trace is not None:
+        node_trace.marker.size = node_size
+        if show_labels:
+            node_trace.mode = "markers+text"
+    
+        fig_3d = go.Figure(data=[*edge_traces, node_trace])
+        fig_3d.update_layout(
+            title=f"3D Structure: {active_entry['name']}",
+            template="plotly_dark",
+            showlegend=False,
+            height=820,
+            margin=dict(l=0, r=0, t=30, b=0),
+            scene=dict(
+                xaxis=dict(showbackground=False, showticklabels=False, title=''),
+                yaxis=dict(showbackground=False, showticklabels=False, title=''),
+                zaxis=dict(showbackground=False, showticklabels=False, title=''),
             )
-            st.plotly_chart(fig_3d, use_container_width=True)
-        else:
-            st.write("Граф пуст.")
+        )
+        st.plotly_chart(fig_3d, use_container_width=True)
+    else:
+        st.write("Граф пуст.")
 
     st.markdown("---")
     st.subheader("Матрица смежности (heatmap)")
