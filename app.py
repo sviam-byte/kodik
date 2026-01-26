@@ -961,14 +961,14 @@ with tab_struct:
         else:
             pos3d = compute_3d_layout(G_view, seed=base_seed)
 
-        edge_trace, node_trace = make_3d_traces(G_view, pos3d, show_scale=True)
+        edge_traces, node_trace = make_3d_traces(G_view, pos3d, show_scale=True)
 
         if node_trace:
             node_trace.marker.size = node_size
             if show_labels:
                 node_trace.mode = "markers+text"
 
-            fig_3d = go.Figure(data=[edge_trace, node_trace])
+            fig_3d = go.Figure(data=[*edge_traces, node_trace])
             fig_3d.update_layout(
                 title=f"3D Structure: {active_entry['name']}",
                 template="plotly_dark",
@@ -1379,10 +1379,10 @@ with tab_attack:
                         H.remove_nodes_from([n for n in removed_set if H.has_node(n)])
 
                         pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
-                        edge_trace, node_trace = make_3d_traces(H, pos_k, show_scale=True)
+                        edge_traces, node_trace = make_3d_traces(H, pos_k, show_scale=True)
 
                         if node_trace:
-                            fig = go.Figure(data=[edge_trace, node_trace])
+                            fig = go.Figure(data=[*edge_traces, node_trace])
                             fig.update_layout(template="plotly_dark", height=860, showlegend=False)
                             fig.update_layout(title=f"Node removal | step={step_val}/{max_steps} | removed~{k_remove} | frac={frac_here:.3f}")
                             st.plotly_chart(fig, use_container_width=True)
@@ -1420,10 +1420,10 @@ with tab_attack:
                                 H.remove_edge(u, v)
 
                         pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
-                        edge_trace, node_trace = make_3d_traces(H, pos_k, show_scale=True)
+                        edge_traces, node_trace = make_3d_traces(H, pos_k, show_scale=True)
 
                         if node_trace:
-                            fig = go.Figure(data=[edge_trace, node_trace])
+                            fig = go.Figure(data=[*edge_traces, node_trace])
                             fig.update_layout(template="plotly_dark", height=860, showlegend=False)
                             fig.update_layout(title=f"Edge removal | step={step_val}/{max_steps} | removed~{k_remove} edges | frac={frac_here:.3f}")
                             st.plotly_chart(fig, use_container_width=True)
