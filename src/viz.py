@@ -10,12 +10,20 @@ def compute_3d_layout(G: nx.Graph, seed: int) -> dict:
 
 
 def make_3d_traces(G: nx.Graph, pos3d: dict, show_scale: bool = False):
-    """Create Plotly 3D traces for nodes and edges."""
+    """Create Plotly 3D traces for nodes and edges.
+
+    Returns:
+        (edge_traces, node_trace)
+        edge_traces is always a list (possibly empty) so callers can safely do [*edge_traces, node_trace].
+    """
     if G.number_of_nodes() == 0:
-        return None, None
+        return [], None
 
     strength = dict(G.degree(weight="weight"))
     nodes = [n for n in G.nodes() if n in pos3d]
+
+    if not nodes:
+        return [], None
 
     xs = [pos3d[n][0] for n in nodes]
     ys = [pos3d[n][1] for n in nodes]
@@ -39,14 +47,20 @@ def make_3d_traces(G: nx.Graph, pos3d: dict, show_scale: bool = False):
         ey.extend([pos3d[u][1], pos3d[v][1], None])
         ez.extend([pos3d[u][2], pos3d[v][2], None])
 
-    edge_trace = go.Scatter3d(
-        x=ex, y=ey, z=ez,
-        mode="lines",
-        line=dict(width=1),
-        hoverinfo="none",
-        name="edges",
-    )
-    return edge_trace, node_trace
+    edge_traces = []
+    if ex:
+        edge_traces.append(
+            go.Scatter3d(
+                x=ex, y=ey, z=ez,
+                mode="lines",
+                line=dict(width=1),
+                hoverinfo="none",
+                name="edges",
+            )
+        )
+
+    return edge_traces, node_trace
+
 
 
 def plot_attack_curves(experiments: list[dict], y_key: str, title: str) -> go.Figure:
