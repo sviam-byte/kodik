@@ -15,7 +15,8 @@ import streamlit as st
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
-from src.metrics import calculate_metrics, compute_3d_layout, make_3d_traces
+from src.metrics import calculate_metrics
+from src.viz import compute_3d_layout, make_3d_traces
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
 from src.attacks import run_attack 
 from src.attacks_mix import run_mix_attack
@@ -952,38 +953,40 @@ with tab_struct:
         if G_view.number_of_nodes() > 2000:
             st.warning(f"Граф большой ({G_view.number_of_nodes()} узлов). 3D может тормозить.")
 
+        # Seed учитывает "анти-кэш" и делает layout детерминированным между перерисовками.
         base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
 
+        # 1) Получаем pos3d (режимы остаются детерминированными через seed).
         if layout_mode.startswith("Fixed"):
-            pos3d_base = compute_3d_layout(G_view, seed=base_seed)
-            G_draw = G_view
-            pos3d = pos3d_base
+            pos3d = compute_3d_layout(G_view, seed=base_seed)
         else:
             pos3d = compute_3d_layout(G_view, seed=base_seed)
 
-            edge_traces, node_trace = make_3d_traces(G_view, pos3d, show_scale=True)
-    
-    if node_trace is not None:
-        node_trace.marker.size = node_size
-        if show_labels:
-            node_trace.mode = "markers+text"
-    
-        fig_3d = go.Figure(data=[*edge_traces, node_trace])
-        fig_3d.update_layout(
-            title=f"3D Structure: {active_entry['name']}",
-            template="plotly_dark",
-            showlegend=False,
-            height=820,
-            margin=dict(l=0, r=0, t=30, b=0),
-            scene=dict(
-                xaxis=dict(showbackground=False, showticklabels=False, title=''),
-                yaxis=dict(showbackground=False, showticklabels=False, title=''),
-                zaxis=dict(showbackground=False, showticklabels=False, title=''),
+        # 2) Всегда строим трэйсы, чтобы 3D работал и для Fixed, и для Recompute.
+        edge_traces, node_trace = make_3d_traces(G_view, pos3d, show_scale=True)
+
+        # 3) Рисуем внутри col_vis_main, чтобы не ломать сетку.
+        if node_trace is not None:
+            node_trace.marker.size = node_size
+            if show_labels:
+                node_trace.mode = "markers+text"
+
+            fig_3d = go.Figure(data=[*edge_traces, node_trace])
+            fig_3d.update_layout(
+                title=f"3D Structure: {active_entry['name']}",
+                template="plotly_dark",
+                showlegend=False,
+                height=820,
+                margin=dict(l=0, r=0, t=30, b=0),
+                scene=dict(
+                    xaxis=dict(showbackground=False, showticklabels=False, title=""),
+                    yaxis=dict(showbackground=False, showticklabels=False, title=""),
+                    zaxis=dict(showbackground=False, showticklabels=False, title=""),
+                ),
             )
-        )
-        st.plotly_chart(fig_3d, use_container_width=True)
-    else:
-        st.write("Граф пуст.")
+            st.plotly_chart(fig_3d, use_container_width=True)
+        else:
+            st.write("Граф пуст.")
 
     st.markdown("---")
     st.subheader("Матрица смежности (heatmap)")
@@ -1381,7 +1384,7 @@ with tab_attack:
                         pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
                         edge_traces, node_trace = make_3d_traces(H, pos_k, show_scale=True)
 
-                        if node_trace:
+                        if node_trace is not None:
                             fig = go.Figure(data=[*edge_traces, node_trace])
                             fig.update_layout(template="plotly_dark", height=860, showlegend=False)
                             fig.update_layout(title=f"Node removal | step={step_val}/{max_steps} | removed~{k_remove} | frac={frac_here:.3f}")
@@ -1422,7 +1425,7 @@ with tab_attack:
                         pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
                         edge_traces, node_trace = make_3d_traces(H, pos_k, show_scale=True)
 
-                        if node_trace:
+                        if node_trace is not None:
                             fig = go.Figure(data=[*edge_traces, node_trace])
                             fig.update_layout(template="plotly_dark", height=860, showlegend=False)
                             fig.update_layout(title=f"Edge removal | step={step_val}/{max_steps} | removed~{k_remove} edges | frac={frac_here:.3f}")
