@@ -76,6 +76,14 @@ HELP_TEXT = {
     "Weak edges": "Удаляем рёбра от слабых к сильным (по weight/confidence).",
     "Low degree": "Удаляем узлы с минимальной степенью (слабые узлы).",
     "Weak strength": "Удаляем узлы с минимальной суммой весов рёбер (слабые узлы по весу).",
+    "H_rw": "Энтропийная скорость случайного блуждания (random-walk entropy rate). Больше = больше альтернативных микромаршрутов.",
+    "H_evo": "Эволюционная энтропия Demetrius (PF-Markov): энтропийная скорость, где переходы согласованы с PF-структурой A.",
+    "kappa_mean": "Средняя Ollivier–Ricci кривизна по выборке рёбер (с учётом dist=1/weight). Больше = локально больше альтернативных путей.",
+    "kappa_frac_negative": "Доля рёбер с отрицательной κ (мосты/бутылочные горлышки).",
+    "fragility_H": "Хрупкость по H_rw: 1/max(H_rw, eps).",
+    "fragility_evo": "Хрупкость по H_evo: 1/max(H_evo, eps).",
+    "fragility_kappa": "Хрупкость по κ̄: 1/max(1+κ̄, eps).",
+
 }
 def help_icon(key: str) -> str:
     return HELP_TEXT.get(key, "")
@@ -788,6 +796,7 @@ tab_main, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
     "🧪 Нулевые модели",
     "💥 Attack Lab",
     "🆚 Сравнение",
+    
 ])
 
 # ------------------------------
@@ -844,6 +853,53 @@ with tab_main:
         f"{float(met.get('epi_thr', float('nan'))):.4g}",
         help=help_icon("epi_thr"),
     )
+        st.markdown("---")
+    st.markdown("### 🧭 Геометрия / робастность (entropy + Ricci)")
+
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric(
+        "H_rw (entropy rate)",
+        f"{float(met.get('H_rw', float('nan'))):.4f}",
+        help=help_icon("H_rw"),
+    )
+    g2.metric(
+        "H_evo (Demetrius)",
+        f"{float(met.get('H_evo', float('nan'))):.4f}",
+        help=help_icon("H_evo"),
+    )
+    g3.metric(
+        "κ̄ (mean Ricci)",
+        f"{float(met.get('kappa_mean', float('nan'))):.4f}",
+        help=help_icon("kappa_mean"),
+    )
+    g4.metric(
+        "% κ<0",
+        f"{100.0*float(met.get('kappa_frac_negative', float('nan'))):.1f}%",
+        help=help_icon("kappa_frac_negative"),
+    )
+
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric(
+        "Frag(H_rw)",
+        f"{float(met.get('fragility_H', float('nan'))):.4g}",
+        help=help_icon("fragility_H"),
+    )
+    h2.metric(
+        "Frag(H_evo)",
+        f"{float(met.get('fragility_evo', float('nan'))):.4g}",
+        help=help_icon("fragility_evo"),
+    )
+    h3.metric(
+        "Frag(κ̄)",
+        f"{float(met.get('fragility_kappa', float('nan'))):.4g}",
+        help=help_icon("fragility_kappa"),
+    )
+    h4.metric(
+        "κ edges (ok/skip)",
+        f"{int(met.get('kappa_computed_edges', 0))}/{int(met.get('kappa_skipped_edges', 0))}",
+        help="Сколько рёбер реально посчитали κ (остальные пропущены из-за ограничения support).",
+    )
+
 
     with st.expander("❔", expanded=False):
         st.markdown(
