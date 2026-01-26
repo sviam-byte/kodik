@@ -1,34 +1,55 @@
+import csv
 import io
+from typing import Optional, Tuple
+
 import pandas as pd
 
 
-def _read_csv_with_encoding_fallback(file_bytes: bytes) -> pd.DataFrame:
-    """Read CSV bytes with a small set of pragmatic encoding fallbacks.
+def _sniff_csv_dialect(file_bytes: bytes, encoding: str) -> Tuple[str, bool]:
+    """Try to detect a delimiter/header from a small decoded prefix."""
+    prefix = file_bytes[: 64 * 1024]
+    text = prefix.decode(encoding, errors="strict")
+    candidates = [",", ";", "\t", "|"]
 
-    Many public datasets (incl. some connectome CSV exports) are encoded as
-    Windows-1252/Latin-1 rather than UTF-8, which triggers:
-      UnicodeDecodeError: 'utf-8' codec can't decode byte 0x..
-    """
+    try:
+        dialect = csv.Sniffer().sniff(text, delimiters=candidates)
+        sep = dialect.delimiter
+    except Exception:
+        lines = text.splitlines()[:50]
+        counts = {d: sum(line.count(d) for line in lines) for d in candidates}
+        sep = max(counts, key=counts.get) if counts else ","
 
-    # Order matters: try strict UTF-8 first, then common fallbacks.
+    try:
+        has_header = csv.Sniffer().has_header(text)
+    except Exception:
+        has_header = True
+
+    return sep, has_header
+
+
+def _read_csv_fast_with_encoding_fallback(file_bytes: bytes) -> pd.DataFrame:
+    """Read CSV bytes quickly with pragmatic encoding fallbacks."""
     encodings_to_try = [
         "utf-8",
-        "utf-8-sig",  # handles BOM
+        "utf-8-sig",
         "cp1252",
         "latin-1",
-        "cp1251",
     ]
 
-    last_err: Exception | None = None
+    last_err: Optional[Exception] = None
     for enc in encodings_to_try:
-        bio = io.BytesIO(file_bytes)
         try:
-            return pd.read_csv(bio, sep=None, engine="python", encoding=enc)
+            sep, _has_header = _sniff_csv_dialect(file_bytes, enc)
         except UnicodeDecodeError as e:
             last_err = e
-        except Exception:
-            # Not a decoding problem (delimiter/malformed/etc.) -> raise immediately.
-            raise
+            continue
+
+        bio = io.BytesIO(file_bytes)
+        try:
+            return pd.read_csv(bio, sep=sep, engine="c", encoding=enc)
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
 
     raise UnicodeDecodeError(
         "utf-8",
@@ -44,7 +65,7 @@ def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     name = (filename or "").lower()
 
     if name.endswith(".csv"):
-        df = _read_csv_with_encoding_fallback(file_bytes)
+        df = _read_csv_fast_with_encoding_fallback(file_bytes)
     elif name.endswith(".xlsx") or name.endswith(".xls"):
         bio = io.BytesIO(file_bytes)
         df = pd.read_excel(bio)
