@@ -853,7 +853,7 @@ with tab_main:
         f"{float(met.get('epi_thr', float('nan'))):.4g}",
         help=help_icon("epi_thr"),
     )
-        st.markdown("---")
+    st.markdown("---")
     st.markdown("### 🧭 Геометрия / робастность (entropy + Ricci)")
 
     g1, g2, g3, g4 = st.columns(4)
