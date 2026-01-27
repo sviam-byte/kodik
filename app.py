@@ -1,4 +1,14 @@
+import streamlit as st
 
+# Quick UI heartbeat: keep at the top so it renders immediately if downstream code stalls.
+st.set_page_config(
+    page_title="Kodik Lab",
+    layout="wide",
+    page_icon="🕸️",
+    initial_sidebar_state="expanded",
+)
+st.title("Graph Lab")
+st.write("UI loaded")
 
 import time
 import uuid
@@ -10,8 +20,9 @@ import pandas as pd
 import networkx as nx
 import plotly.graph_objects as go
 import plotly.express as px
-import streamlit as st
 
+from compute import compute_layout as compute_layout_cached
+from compute import compute_curvature as compute_curvature_cached
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
@@ -109,13 +120,6 @@ def _quick_counts(df: pd.DataFrame, src_col: str, dst_col: str) -> tuple[int, in
         return 0, 0
     nodes = pd.unique(pd.concat([df[src_col], df[dst_col]], ignore_index=True))
     return int(len(nodes)), int(len(df))
-
-st.set_page_config(
-    page_title="Kodik Lab",
-    layout="wide",
-    page_icon="🕸️",
-    initial_sidebar_state="expanded",
-)
 
 st.markdown(
     """
@@ -916,25 +920,23 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**🐢 Тяжёлые метрики**")
-    if "__compute_curvature" not in st.session_state:
-        st.session_state["__compute_curvature"] = False
     if "__curvature_sample_edges" not in st.session_state:
         st.session_state["__curvature_sample_edges"] = 80
-    compute_curv = st.checkbox(
-        "Считать Ollivier–Ricci κ (очень медленно)",
-        value=bool(st.session_state["__compute_curvature"]),
+    if "__compute_curvature_now" not in st.session_state:
+        st.session_state["__compute_curvature_now"] = False
+
+    curv_edges = st.slider(
+        "κ: сколько рёбер сэмплировать",
+        min_value=20,
+        max_value=300,
+        value=int(st.session_state["__curvature_sample_edges"]),
+        step=10,
     )
-    st.session_state["__compute_curvature"] = bool(compute_curv)
-    curv_edges = int(st.session_state["__curvature_sample_edges"])
-    if compute_curv:
-        curv_edges = st.slider(
-            "κ: сколько рёбер сэмплировать",
-            min_value=20,
-            max_value=300,
-            value=int(curv_edges),
-            step=10,
-        )
     st.session_state["__curvature_sample_edges"] = int(curv_edges)
+
+    if st.button("Compute Ricci (slow)", use_container_width=True):
+        # Signal to compute curvature later when the graph is available.
+        st.session_state["__compute_curvature_now"] = True
 
     st.markdown("---")
     # Stop-crane: prevent automatic heavy recomputation on every UI change.
@@ -942,9 +944,10 @@ with st.sidebar:
         f"{active_entry['id']}|{df_hash}|{src_col}|{dst_col}|"
         f"{float(min_conf)}|{float(min_weight)}|{analysis_mode}"
     )
-    run_calc = st.button("🚀 ПЕРЕСЧИТАТЬ ВСЁ", type="primary", use_container_width=True)
-    if run_calc:
+    load_graph = st.button("Load graph", type="primary", use_container_width=True)
+    if load_graph:
         st.session_state["layout_seed_bump"] = int(st.session_state.get("layout_seed_bump", 0)) + 1
+        st.session_state["__last_graph_key"] = graph_key
 
 # Lazily build graph + metrics only after explicit user action.
 metrics_cache_key = f"metrics_{graph_key}"
@@ -952,7 +955,7 @@ G_full = None
 G_view = None
 met = None
 
-if run_calc:
+if load_graph:
     with st.spinner("Строю граф…"):
         G_full = _build_graph_cached(
             active_entry["id"],
@@ -982,9 +985,13 @@ if run_calc:
             float(min_weight),
             analysis_mode,
             int(seed_val),
-            bool(st.session_state.get("__compute_curvature", False)),
+            False,
             int(st.session_state.get("__curvature_sample_edges", 80)),
         )
+    with st.spinner("Готовлю layout…"):
+        # Cache a quick 2D layout explicitly on demand.
+        st.session_state[f"layout2d_{graph_key}"] = compute_layout_cached(G_view)
+    st.success("Graph ready")
     st.session_state[metrics_cache_key] = met
 elif metrics_cache_key in st.session_state:
     G_full = _build_graph_cached(
@@ -1007,8 +1014,32 @@ elif metrics_cache_key in st.session_state:
     )
     met = st.session_state.get(metrics_cache_key)
 else:
-    st.info("👋 Выберите параметры и нажмите **'ПЕРЕСЧИТАТЬ ВСЁ'** в сайдбаре для начала анализа.")
+    st.info("👋 Выберите параметры и нажмите **'Load graph'** в сайдбаре для начала анализа.")
     st.stop()
+
+# Trigger curvature computation only after the user explicitly requests it.
+curvature_cache_key = (
+    f"curvature_{graph_key}|{int(st.session_state.get('__curvature_sample_edges', 80))}|{int(seed_val)}"
+)
+if st.session_state.get("__compute_curvature_now"):
+    st.session_state["__compute_curvature_now"] = False
+    if G_view is None:
+        st.warning("Сначала нажми **Load graph**, чтобы построить граф.")
+    else:
+        with st.spinner("Считаю Ricci (это может занять время)…"):
+            curvature_result = compute_curvature_cached(
+                G_view,
+                sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
+                seed=int(seed_val),
+            )
+        st.session_state[curvature_cache_key] = curvature_result
+        st.success("Ricci computed")
+
+if met is not None:
+    cached_curvature = st.session_state.get(curvature_cache_key)
+    if cached_curvature:
+        # Merge curvature metrics into the main metrics payload for UI rendering.
+        met = {**met, **cached_curvature}
 
 # ============================================================
 # 8) MAIN TABS (Attack/Compare are in PART 2)
@@ -1027,7 +1058,7 @@ tab_main, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
 # ------------------------------
 with tab_main:
     if G_view is None:
-        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **Load graph**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         st.header(f"Обзор: {active_entry['name']}")
         if G_view.number_of_nodes() > 1500:
@@ -1163,7 +1194,7 @@ with tab_main:
 # ------------------------------
 with tab_struct:
     if G_view is None:
-        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **Load graph**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         if G_view.number_of_nodes() > 1500:
             st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
@@ -1284,7 +1315,7 @@ with tab_struct:
 # ------------------------------
 with tab_null:
     if G_view is None:
-        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **Load graph**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         st.header("🧪 Нулевые модели и синтетика")
 
@@ -1345,7 +1376,7 @@ with tab_null:
         # ============================================================
 with tab_attack:
     if G_view is None:
-        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **Load graph**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         st.header("💥 Attack Lab (node + edge + weak)")
 
@@ -1967,7 +1998,7 @@ with tab_attack:
         # ============================================================
 with tab_compare:
     if G_view is None:
-        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **Load graph**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         st.header("🆚 Сравнение")
 
