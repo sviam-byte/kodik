@@ -1,10 +1,56 @@
 import streamlit as st
 
+import hashlib
+
 import networkx as nx
 import numpy as np
 import pandas as pd
 
 from src.robust_geom import fragility_from_curvature, ollivier_ricci_summary
+
+
+def _hash_nx_graph(G: nx.Graph) -> str:
+    """Return a stable hash for a NetworkX graph.
+
+    Streamlit's cache needs a hashable representation of function arguments.
+    NetworkX graphs contain mutable dicts, so Streamlit's default hasher may
+    fail with UnhashableParamError.
+
+    We hash a deterministic serialization of nodes and edges including edge
+    attributes.
+    """
+    h = hashlib.sha256()
+
+    h.update(b"directed=")
+    h.update(b"1" if G.is_directed() else b"0")
+    h.update(b"\n")
+
+    # Nodes
+    for n in sorted(G.nodes(), key=lambda x: str(x)):
+        h.update(b"N:")
+        h.update(str(n).encode("utf-8", errors="replace"))
+        h.update(b"\n")
+
+    # Edges + attributes (sorted for determinism)
+    def _edge_key(e):
+        u, v, _d = e
+        return (str(u), str(v))
+
+    for u, v, d in sorted(G.edges(data=True), key=_edge_key):
+        h.update(b"E:")
+        h.update(str(u).encode("utf-8", errors="replace"))
+        h.update(b"->")
+        h.update(str(v).encode("utf-8", errors="replace"))
+        h.update(b"|")
+        if d:
+            for k in sorted(d.keys(), key=lambda x: str(x)):
+                h.update(str(k).encode("utf-8", errors="replace"))
+                h.update(b"=")
+                h.update(repr(d.get(k)).encode("utf-8", errors="replace"))
+                h.update(b";")
+        h.update(b"\n")
+
+    return h.hexdigest()
 
 
 @st.cache_resource(show_spinner=False)
@@ -17,13 +63,13 @@ def build_graph(df: pd.DataFrame) -> nx.Graph:
     return nx.from_pandas_edgelist(df, "src", "dst", edge_attr=True)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, hash_funcs={nx.Graph: _hash_nx_graph})
 def compute_layout(G: nx.Graph) -> dict:
     """Compute and cache a deterministic 2D layout for quick preview plots."""
     return nx.spring_layout(G, seed=42)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, hash_funcs={nx.Graph: _hash_nx_graph})
 def compute_curvature(
     G: nx.Graph,
     sample_edges: int = 150,
