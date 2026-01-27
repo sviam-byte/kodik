@@ -1,4 +1,5 @@
 import streamlit as st
+st.write("BOOT OK")
 
 # Quick UI heartbeat: keep at the top so it renders immediately if downstream code stalls.
 st.set_page_config(
