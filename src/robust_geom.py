@@ -5,9 +5,11 @@ from dataclasses import dataclass
 import math
 import random
 from typing import Dict, List, Tuple, Optional
+import multiprocessing
 
 import numpy as np
 import networkx as nx
+from joblib import Parallel, delayed
 
 
 # -----------------------------
@@ -62,37 +64,28 @@ def network_entropy_rate(G: nx.Graph, base: float = math.e, **_ignored) -> float
     H = _as_undirected_simple(G)
     if H.number_of_nodes() < 2 or H.number_of_edges() == 0:
         return 0.0
-
-    strength = dict(H.degree(weight="weight"))
-    total_strength = float(sum(max(0.0, float(s)) for s in strength.values()))
-    if total_strength <= 0:
+    # Vectorized computation via sparse adjacency to avoid Python loops.
+    A = nx.adjacency_matrix(H, weight="weight").astype(float).tocsr()
+    if A.nnz == 0:
+        return 0.0
+    d = np.array(A.sum(axis=1)).flatten()
+    total_s = float(d.sum())
+    if total_s <= 0:
         return 0.0
 
+    pi = d / total_s
     log_base = math.log(base)
 
-    out = 0.0
-    for i in H.nodes():
-        s_i = float(strength.get(i, 0.0))
-        if s_i <= 0:
-            continue
-        pi_i = s_i / total_strength
+    # Normalize rows: P_ij = w_ij / d_i (zero-degree rows stay zero).
+    inv_d = np.reciprocal(d, out=np.zeros_like(d), where=d > 0)
+    P = A.multiply(inv_d[:, None])
 
-        row_ent = 0.0
-        for j, d in H[i].items():
-            w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except Exception:
-                w = 1.0
-            if w <= 0:
-                continue
-            p = w / s_i
-            if p > 0:
-                row_ent -= p * (math.log(p) / log_base)
+    # Row-wise entropy: -sum(p_ij * log(p_ij)) for each i.
+    log_P = P.copy()
+    log_P.data = np.log(P.data + 1e-15) / log_base
+    row_ents = -np.array((P.multiply(log_P)).sum(axis=1)).flatten()
 
-        out += pi_i * row_ent
-
-    return float(out)
+    return float(np.sum(pi * row_ents))
 
 
 # -----------------------------
@@ -255,14 +248,17 @@ def ollivier_ricci_summary(
     if len(edges) > int(sample_edges):
         edges = rng.sample(edges, int(sample_edges))
 
-    kappas: List[float] = []
-    skipped = 0
-    for x, y in edges:
-        k = ollivier_ricci_edge(H, x, y, max_support=max_support, cutoff=cutoff, scale=scale)
-        if k is None or not np.isfinite(k):
-            skipped += 1
-            continue
-        kappas.append(float(k))
+    # Parallelize per-edge curvature for a big speedup on multi-core machines.
+    num_cores = max(1, min(multiprocessing.cpu_count(), len(edges)))
+    results = Parallel(n_jobs=num_cores)(
+        delayed(ollivier_ricci_edge)(
+            H, x, y, max_support=max_support, cutoff=cutoff, scale=scale
+        )
+        for x, y in edges
+    )
+
+    kappas = [float(k) for k in results if k is not None and np.isfinite(k)]
+    skipped = len(edges) - len(kappas)
 
     if len(kappas) == 0:
         return CurvatureSummary(float("nan"), float("nan"), float("nan"), 0, int(skipped))

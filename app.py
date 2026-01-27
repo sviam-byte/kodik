@@ -32,15 +32,75 @@ from src.session_io import (
 # Streamlit caching helpers
 # -----------------------------
 @st.cache_data(show_spinner=False)
-def _filter_edges_cached(df_edges: pd.DataFrame, src_col: str, dst_col: str, min_conf: float, min_weight: float) -> pd.DataFrame:
-    """Cache-friendly wrapper around filter_edges."""
-    return filter_edges(df_edges, src_col, dst_col, min_conf, min_weight)
+def _filter_edges_cached(
+    graph_id: str,
+    df_hash: str,
+    src_col: str,
+    dst_col: str,
+    min_conf: float,
+    min_weight: float,
+) -> pd.DataFrame:
+    """Cache-friendly wrapper around filter_edges keyed by graph ID + data hash."""
+    entry = st.session_state["graphs"][graph_id]
+    return filter_edges(entry["edges"], src_col, dst_col, min_conf, min_weight)
 
 
 @st.cache_resource(show_spinner=False)
-def _build_graph_cached(df_filtered: pd.DataFrame, src_col: str, dst_col: str) -> nx.Graph:
-    """Build NetworkX graph once per filtered edge set."""
-    return build_graph_from_edges(df_filtered, src_col, dst_col)
+def _build_graph_cached(
+    graph_id: str,
+    df_hash: str,
+    src_col: str,
+    dst_col: str,
+    min_conf: float,
+    min_weight: float,
+    analysis_mode: str,
+) -> nx.Graph:
+    """Build NetworkX graph once per filter + analysis mode settings."""
+    df_filtered = _filter_edges_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight)
+    G = build_graph_from_edges(df_filtered, src_col, dst_col)
+    if analysis_mode.startswith("LCC"):
+        G = lcc_subgraph(G)
+    return G
+
+
+@st.cache_data(show_spinner=False)
+def _metrics_cached(
+    graph_id: str,
+    df_hash: str,
+    src_col: str,
+    dst_col: str,
+    min_conf: float,
+    min_weight: float,
+    analysis_mode: str,
+    seed: int,
+    compute_curvature: bool,
+    curvature_sample_edges: int,
+) -> dict:
+    """Cache heavy metrics separately from graph construction."""
+    G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
+    return calculate_metrics(
+        G,
+        eff_sources_k=32,
+        seed=int(seed),
+        compute_curvature=bool(compute_curvature),
+        curvature_sample_edges=int(curvature_sample_edges),
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _layout_cached(
+    graph_id: str,
+    df_hash: str,
+    src_col: str,
+    dst_col: str,
+    min_conf: float,
+    min_weight: float,
+    analysis_mode: str,
+    seed: int,
+) -> dict:
+    """Cache 3D layouts so layout recomputation does not block UI."""
+    G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
+    return compute_3d_layout(G, seed=int(seed))
 
 
 def _quick_counts(df: pd.DataFrame, src_col: str, dst_col: str) -> tuple[int, int]:
@@ -286,13 +346,26 @@ def _fallback_removal_order(G: nx.Graph, kind: str, seed: int):
     rng.shuffle(nodes)
     return nodes
 
-def _compute_metrics_snapshot(G: nx.Graph, eff_k: int, seed: int, heavy: bool):
+def _compute_metrics_snapshot(
+    G: nx.Graph,
+    eff_k: int,
+    seed: int,
+    heavy: bool,
+    compute_curvature: bool,
+    curvature_sample_edges: int,
+):
     """
     Safe wrapper around calculate_metrics.
     If heavy=False: we still call calculate_metrics, but pass smaller eff_k upstream (already controlled by caller).
     Heavy gating is handled by caller by skipping/ffill some columns.
     """
-    m = calculate_metrics(G, eff_sources_k=int(eff_k), seed=int(seed))
+    m = calculate_metrics(
+        G,
+        eff_sources_k=int(eff_k),
+        seed=int(seed),
+        compute_curvature=bool(compute_curvature and heavy),
+        curvature_sample_edges=int(curvature_sample_edges),
+    )
     return m
 
 def run_edge_attack(
@@ -351,7 +424,14 @@ def run_edge_attack(
         removed_frac = (k / total_e) if total_e else 0.0
 
         heavy = (i % int(max(1, compute_heavy_every)) == 0) or (i == steps)
-        m = _compute_metrics_snapshot(H, eff_k=eff_k, seed=seed, heavy=heavy)
+        m = _compute_metrics_snapshot(
+            H,
+            eff_k=eff_k,
+            seed=seed,
+            heavy=heavy,
+            compute_curvature=bool(st.session_state.get("__compute_curvature", False)),
+            curvature_sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
+        )
 
         row = {
             "step": i,
@@ -533,7 +613,14 @@ def emulate_node_attack_from_order(
 
         removed_frac = (k / N0) if N0 else 0.0
         heavy = (i % int(max(1, compute_heavy_every)) == 0) or (i == int(steps))
-        m = _compute_metrics_snapshot(H, eff_k=eff_k, seed=seed, heavy=heavy)
+        m = _compute_metrics_snapshot(
+            H,
+            eff_k=eff_k,
+            seed=seed,
+            heavy=heavy,
+            compute_curvature=bool(st.session_state.get("__compute_curvature", False)),
+            curvature_sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
+        )
 
         row = {
             "step": i,
@@ -791,13 +878,20 @@ df_edges = active_entry["edges"]
 src_col = active_entry["tags"].get("src_col", df_edges.columns[0])
 dst_col = active_entry["tags"].get("dst_col", df_edges.columns[1])
 
-# Fast filtering (cached) and cheap counts. Full NetworkX graph is built lazily only after user action.
-df_filtered = _filter_edges_cached(df_edges, src_col, dst_col, float(min_conf), float(min_weight))
+# Cache key should avoid hashing the full DataFrame repeatedly.
+df_hash = hashlib.md5(pd.util.hash_pandas_object(df_edges).values).hexdigest()
+
+# Fast filtering (cached) and cheap counts. Full NetworkX graph is built lazily after user action.
+df_filtered = _filter_edges_cached(
+    active_entry["id"],
+    df_hash,
+    src_col,
+    dst_col,
+    float(min_conf),
+    float(min_weight),
+)
 est_nodes, est_edges = _quick_counts(df_filtered, src_col, dst_col)
 
-graph_key = f"{active_entry['id']}|{src_col}|{dst_col}|{float(min_conf)}|{float(min_weight)}"
-if "__graph_ready_key" not in st.session_state:
-    st.session_state["__graph_ready_key"] = None
 if "__analysis_mode" not in st.session_state:
     st.session_state["__analysis_mode"] = "Global (Весь граф)"
 
@@ -821,24 +915,100 @@ with st.sidebar:
     st.session_state["seed"] = int(seed_val)
 
     st.markdown("---")
-    # Prevent heavy computations during initial page load: user must explicitly trigger graph build.
-    build_clicked = st.button("▶️ Построить граф и посчитать", type="primary", use_container_width=True)
-    if build_clicked:
-        st.session_state["__graph_ready_key"] = graph_key
-        st.session_state["layout_seed_bump"] = int(st.session_state.get("layout_seed_bump", 0)) + 1
-        st.rerun()
+    st.markdown("**🐢 Тяжёлые метрики**")
+    if "__compute_curvature" not in st.session_state:
+        st.session_state["__compute_curvature"] = False
+    if "__curvature_sample_edges" not in st.session_state:
+        st.session_state["__curvature_sample_edges"] = 80
+    compute_curv = st.checkbox(
+        "Считать Ollivier–Ricci κ (очень медленно)",
+        value=bool(st.session_state["__compute_curvature"]),
+    )
+    st.session_state["__compute_curvature"] = bool(compute_curv)
+    curv_edges = int(st.session_state["__curvature_sample_edges"])
+    if compute_curv:
+        curv_edges = st.slider(
+            "κ: сколько рёбер сэмплировать",
+            min_value=20,
+            max_value=300,
+            value=int(curv_edges),
+            step=10,
+        )
+    st.session_state["__curvature_sample_edges"] = int(curv_edges)
 
-# Lazily build graph only after explicit user action.
+    st.markdown("---")
+    # Stop-crane: prevent automatic heavy recomputation on every UI change.
+    graph_key = (
+        f"{active_entry['id']}|{df_hash}|{src_col}|{dst_col}|"
+        f"{float(min_conf)}|{float(min_weight)}|{analysis_mode}"
+    )
+    run_calc = st.button("🚀 ПЕРЕСЧИТАТЬ ВСЁ", type="primary", use_container_width=True)
+    if run_calc:
+        st.session_state["layout_seed_bump"] = int(st.session_state.get("layout_seed_bump", 0)) + 1
+
+# Lazily build graph + metrics only after explicit user action.
+metrics_cache_key = f"metrics_{graph_key}"
 G_full = None
 G_view = None
-if st.session_state.get("__graph_ready_key") == graph_key:
+met = None
+
+if run_calc:
     with st.spinner("Строю граф…"):
-        G_full = _build_graph_cached(df_filtered, src_col, dst_col)
-    if analysis_mode.startswith("LCC"):
-        with st.spinner("Выделяю LCC…"):
-            G_view = lcc_subgraph(G_full)
-    else:
-        G_view = G_full
+        G_full = _build_graph_cached(
+            active_entry["id"],
+            df_hash,
+            src_col,
+            dst_col,
+            float(min_conf),
+            float(min_weight),
+            "Global (Весь граф)",
+        )
+        G_view = _build_graph_cached(
+            active_entry["id"],
+            df_hash,
+            src_col,
+            dst_col,
+            float(min_conf),
+            float(min_weight),
+            analysis_mode,
+        )
+    with st.spinner("Считаю метрики…"):
+        met = _metrics_cached(
+            active_entry["id"],
+            df_hash,
+            src_col,
+            dst_col,
+            float(min_conf),
+            float(min_weight),
+            analysis_mode,
+            int(seed_val),
+            bool(st.session_state.get("__compute_curvature", False)),
+            int(st.session_state.get("__curvature_sample_edges", 80)),
+        )
+    st.session_state[metrics_cache_key] = met
+elif metrics_cache_key in st.session_state:
+    G_full = _build_graph_cached(
+        active_entry["id"],
+        df_hash,
+        src_col,
+        dst_col,
+        float(min_conf),
+        float(min_weight),
+        "Global (Весь граф)",
+    )
+    G_view = _build_graph_cached(
+        active_entry["id"],
+        df_hash,
+        src_col,
+        dst_col,
+        float(min_conf),
+        float(min_weight),
+        analysis_mode,
+    )
+    met = st.session_state.get(metrics_cache_key)
+else:
+    st.info("👋 Выберите параметры и нажмите **'ПЕРЕСЧИТАТЬ ВСЁ'** в сайдбаре для начала анализа.")
+    st.stop()
 
 # ============================================================
 # 8) MAIN TABS (Attack/Compare are in PART 2)
@@ -857,10 +1027,11 @@ tab_main, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
 # ------------------------------
 with tab_main:
     if G_view is None:
-        st.info("Нажми в сайдбаре **▶️ Построить граф и посчитать**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         st.header(f"Обзор: {active_entry['name']}")
-        met = calculate_metrics(G_view, eff_sources_k=32, seed=int(seed_val))
+        if G_view.number_of_nodes() > 1500:
+            st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("N (Nodes)", met.get("N", G_view.number_of_nodes()), help=help_icon("N"))
@@ -992,8 +1163,10 @@ with tab_main:
 # ------------------------------
 with tab_struct:
     if G_view is None:
-        st.info("Нажми в сайдбаре **▶️ Построить граф и посчитать**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
+        if G_view.number_of_nodes() > 1500:
+            st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
         col_vis_ctrl, col_vis_main = st.columns([1, 4])
 
         with col_vis_ctrl:
@@ -1030,9 +1203,27 @@ with tab_struct:
 
             # 1) Получаем pos3d (режимы остаются детерминированными через seed).
             if layout_mode.startswith("Fixed"):
-                pos3d = compute_3d_layout(G_view, seed=base_seed)
+                pos3d = _layout_cached(
+                    active_entry["id"],
+                    df_hash,
+                    src_col,
+                    dst_col,
+                    float(min_conf),
+                    float(min_weight),
+                    analysis_mode,
+                    base_seed,
+                )
             else:
-                pos3d = compute_3d_layout(G_view, seed=base_seed)
+                pos3d = _layout_cached(
+                    active_entry["id"],
+                    df_hash,
+                    src_col,
+                    dst_col,
+                    float(min_conf),
+                    float(min_weight),
+                    analysis_mode,
+                    base_seed,
+                )
 
             edge_overlay = "ricci"
             flow_mode = "rw"
@@ -1093,7 +1284,7 @@ with tab_struct:
 # ------------------------------
 with tab_null:
     if G_view is None:
-        st.info("Нажми в сайдбаре **▶️ Построить граф и посчитать**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         st.header("🧪 Нулевые модели и синтетика")
 
@@ -1154,7 +1345,7 @@ with tab_null:
         # ============================================================
 with tab_attack:
     if G_view is None:
-        st.info("Нажми в сайдбаре **▶️ Построить граф и посчитать**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         st.header("💥 Attack Lab (node + edge + weak)")
 
@@ -1478,7 +1669,16 @@ with tab_attack:
                         edge_overlay = "none"
 
                     base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
-                    pos_base = compute_3d_layout(G_view, seed=base_seed)
+                    pos_base = _layout_cached(
+                        active_entry["id"],
+                        df_hash,
+                        src_col,
+                        dst_col,
+                        float(min_conf),
+                        float(min_weight),
+                        analysis_mode,
+                        base_seed,
+                    )
 
                     if fam == "mix":
                         st.info("Для Mix/Entropy 3D-декомпозиция не поддерживается (нет порядка удаления).")
@@ -1767,7 +1967,7 @@ with tab_attack:
         # ============================================================
 with tab_compare:
     if G_view is None:
-        st.info("Нажми в сайдбаре **▶️ Построить граф и посчитать**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
+        st.info("Нажми в сайдбаре **🚀 ПЕРЕСЧИТАТЬ ВСЁ**, чтобы загрузка не тормозила. Пока показаны только быстрые счётчики после фильтров.")
     else:
         st.header("🆚 Сравнение")
 
