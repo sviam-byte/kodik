@@ -1,13 +1,14 @@
 import streamlit as st
-st.write("BOOT OK")
 
-# Quick UI heartbeat: keep at the top so it renders immediately if downstream code stalls.
+# IMPORTANT: st.set_page_config() must be the first Streamlit command in the script.
 st.set_page_config(
     page_title="Kodik Lab",
     layout="wide",
     page_icon="🕸️",
     initial_sidebar_state="expanded",
 )
+# Quick UI heartbeat: keep at the top so it renders immediately if downstream code stalls.
+st.write("BOOT OK")
 st.title("Graph Lab")
 st.write("UI loaded")
 
