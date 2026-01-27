@@ -8,12 +8,6 @@ import networkx as nx
 
 from .metrics import calculate_metrics, add_dist_attr
 
-# NOTE: app.py imports run_attack from this module.
-# We extend it with adaptive "weak-node" strategies that choose
-# the next weakest nodes at every step:
-# - low_degree: remove current minimum-degree nodes step-by-step
-# - weak_strength: remove current minimum-strength nodes (sum of weights)
-
 def _as_simple_undirected(G: nx.Graph) -> nx.Graph:
     """
     Convert to a simple undirected graph so ranking metrics do not break.
@@ -205,13 +199,16 @@ def run_attack(
     """
     Возвращает:
       df_hist: stepwise metrics
-      states: list of graphs (если keep_states)
+      aux: dict with 'removed_nodes' list (critical for UI) and optionally 'states'
     """
     attack_kind = str(attack_kind)
-    # Always normalize the input graph to avoid failures in k-core/centralities.
     G_in = _as_simple_undirected(G_in)
+    
+    # -----------------------------------------------------
+    # BRANCH 1: Adaptive attacks (weak nodes / low degree)
+    # -----------------------------------------------------
     if attack_kind in ("low_degree", "weak_strength"):
-        H0 = _as_simple_undirected(G_in)
+        H0 = G_in
         N0 = H0.number_of_nodes()
         if N0 < 2:
             return pd.DataFrame(), {"removed_nodes": [], "states": []}
@@ -249,21 +246,10 @@ def run_attack(
                     "N": H.number_of_nodes(),
                     "E": H.number_of_edges(),
                     "C": nx.number_connected_components(H) if H.number_of_nodes() else 0,
-                    "eff_w": np.nan,
-                    "l2_lcc": np.nan,
-                    "tau_lcc": np.nan,
-                    "lmax": np.nan,
-                    "thresh": np.nan,
-                    "mod": np.nan,
                     "density": nx.density(H) if H.number_of_nodes() > 1 else 0.0,
                     "avg_degree": (2 * H.number_of_edges() / H.number_of_nodes()) if H.number_of_nodes() else 0.0,
-                    "beta": int(H.number_of_edges() - H.number_of_nodes() + nx.number_connected_components(H)) if H.number_of_nodes() else 0,
                     "lcc_size": len(max(nx.connected_components(H), key=len)) if H.number_of_nodes() else 0,
                     "lcc_frac": 0.0,
-                    "entropy_deg": np.nan,
-                    "assortativity": np.nan,
-                    "clustering": np.nan,
-                    "diameter_approx": None,
                 }
 
             met["step"] = int(step)
@@ -294,10 +280,13 @@ def run_attack(
         aux = {"removed_nodes": removed_nodes, "mode": "adaptive", "states": states}
         return df_hist, aux
 
+    # -----------------------------------------------------
+    # BRANCH 2: Standard attacks (centrality / random)
+    # -----------------------------------------------------
     G_curr = G_in.copy()
     N0 = G_curr.number_of_nodes()
     if N0 < 2:
-        return pd.DataFrame(), []
+        return pd.DataFrame(), {"removed_nodes": [], "states": []}
 
     total_remove = int(N0 * float(remove_frac))
     step_size = max(1, total_remove // int(steps))
@@ -305,6 +294,7 @@ def run_attack(
     rng = random.Random(int(seed))
     history = []
     states = []
+    removed_nodes_all = [] # <--- ВАЖНО: накапливаем удаленные узлы
 
     removed_total = 0
 
@@ -315,7 +305,6 @@ def run_attack(
         if keep_states:
             states.append(G_curr.copy())
 
-        # metrics: heavy every k, but LCC frac always
         heavy = (step % max(1, int(compute_heavy_every)) == 0)
 
         if heavy:
@@ -326,26 +315,14 @@ def run_attack(
                 compute_curvature=False,
             )
         else:
-            # cheap metrics
             met = {
                 "N": G_curr.number_of_nodes(),
                 "E": G_curr.number_of_edges(),
                 "C": nx.number_connected_components(G_curr) if G_curr.number_of_nodes() else 0,
-                "eff_w": np.nan,
-                "l2_lcc": np.nan,
-                "tau_lcc": np.nan,
-                "lmax": np.nan,
-                "thresh": np.nan,
-                "mod": np.nan,
                 "density": nx.density(G_curr) if G_curr.number_of_nodes() > 1 else 0.0,
                 "avg_degree": (2 * G_curr.number_of_edges() / G_curr.number_of_nodes()) if G_curr.number_of_nodes() else 0.0,
-                "beta": int(G_curr.number_of_edges() - G_curr.number_of_nodes() + nx.number_connected_components(G_curr)) if G_curr.number_of_nodes() else 0,
                 "lcc_size": len(max(nx.connected_components(G_curr), key=len)) if G_curr.number_of_nodes() else 0,
-                "lcc_frac": 0.0,  # will be overwritten below
-                "entropy_deg": np.nan,
-                "assortativity": np.nan,
-                "clustering": np.nan,
-                "diameter_approx": None,
+                "lcc_frac": 0.0,
             }
 
         met["step"] = int(step)
@@ -356,7 +333,7 @@ def run_attack(
 
         history.append(met)
 
-        # pick targets
+        # Pick targets
         targets = pick_targets_for_attack(
             G_curr,
             attack_kind=attack_kind,
@@ -372,16 +349,18 @@ def run_attack(
             k = min(len(nodes), step_size)
             targets = rng.sample(nodes, k) if k > 0 else []
 
-        # apply removal
         G_curr.remove_nodes_from(targets)
+        removed_nodes_all.extend(targets) # <--- ВАЖНО: сохраняем порядок
         removed_total += len(targets)
 
         if removed_total >= total_remove:
             break
 
-    # final state snapshot
     if keep_states and G_curr.number_of_nodes() > 0:
         states.append(G_curr.copy())
 
     df_hist = pd.DataFrame(history)
-    return df_hist, states
+    
+    # Возвращаем словарь с removed_nodes, как того ожидает app.py
+    aux = {"removed_nodes": removed_nodes_all, "mode": "standard", "states": states}
+    return df_hist, aux
