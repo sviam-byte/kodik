@@ -969,6 +969,24 @@ def render_top_bar():
 
 active_entry = render_top_bar()
 if not active_entry:
+    # Важно: не останавливаем приложение ДО создания табов.
+    tab_main, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
+        "📊 Дэшборд",
+        "🕸️ Структура и 3D",
+        "🧪 Нулевые модели",
+        "💥 Attack Lab",
+        "🆚 Сравнение",
+    ])
+    with tab_main:
+        st.warning("Workspace пуст. Слева загрузи файл или создай демо-граф.")
+    with tab_struct:
+        st.info("Сначала нужен граф в Workspace.")
+    with tab_null:
+        st.info("Сначала нужен граф в Workspace.")
+    with tab_attack:
+        st.info("Сначала нужен граф в Workspace.")
+    with tab_compare:
+        st.info("Сначала нужны эксперименты/атаки.")
     st.stop()
 
 # ============================================================
@@ -1111,25 +1129,25 @@ elif metrics_cache_key in st.session_state:
     met = st.session_state.get(metrics_cache_key)
 else:
     st.info("👋 Выберите параметры и нажмите **'Load graph'** в сайдбаре для начала анализа.")
-    st.stop()
+    # Не стопаем — пусть отрисуются табы и UI.
+    G_full = None
+    G_view = None
+    met = None
 
 # Trigger curvature computation only after the user explicitly requests it.
 curvature_cache_key = (
     f"curvature_{graph_key}|{int(st.session_state.get('__curvature_sample_edges', 80))}|{int(seed_val)}"
 )
-if st.session_state.get("__compute_curvature_now"):
+if (G_view is not None) and st.session_state.get("__compute_curvature_now"):
     st.session_state["__compute_curvature_now"] = False
-    if G_view is None:
-        st.warning("Сначала нажми **Load graph**, чтобы построить граф.")
-    else:
-        with st.spinner("Считаю Ricci (это может занять время)…"):
-            curvature_result = compute_curvature_cached(
-                G_view,
-                sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
-                seed=int(seed_val),
-            )
-        st.session_state[curvature_cache_key] = curvature_result
-        st.success("Ricci computed")
+    with st.spinner("Считаю Ricci (это может занять время)…"):
+        curvature_result = compute_curvature_cached(
+            G_view,
+            sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
+            seed=int(seed_val),
+        )
+    st.session_state[curvature_cache_key] = curvature_result
+    st.success("Ricci computed")
 
 if met is not None:
     cached_curvature = st.session_state.get(curvature_cache_key)
@@ -1400,7 +1418,12 @@ with tab_struct:
             st.caption("Анимация диффузии/потока по графу: узлы окрашены по энергии, рёбра — по потоку (flux).")
             c1, c2, c3 = st.columns([1, 1, 2])
             with c1:
-                flow_mode_ui = st.selectbox("Модель", ["rw", "evo"], index=0)
+                flow_mode_ui = st.selectbox(
+                    "Модель",
+                    ["phys", "rw", "evo"],
+                    index=0,
+                    help="phys: pressure/flow по рёбрам; rw/evo: диффузия.",
+                )
                 flow_steps = st.slider("Шаги", 1, 80, 25)
             with c2:
                 flow_damp = st.slider("Damping", 0.0, 1.0, 1.0, 0.05)
