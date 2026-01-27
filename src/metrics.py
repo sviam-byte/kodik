@@ -562,16 +562,16 @@ def simulate_energy_flow(
     damping: float = 1.0,
     sources: Optional[List] = None,
 ) -> Tuple[List[Dict], List[Dict[Tuple, float]]]:
-    """Return per-step node energies and per-step edge fluxes for animation.
+    """Per-step node energies + per-step edge fluxes (for Plotly frames).
 
-    Output lengths: steps + 1 for t = 0..steps.
+    Output lengths: steps+1 for t = 0..steps.
     """
     H = _as_undirected_simple(G)
     nodes = list(H.nodes())
     if not nodes:
         return [], []
 
-    # Pick sources (fallback to top-strength node).
+    # Sources: user-provided subset, else top-strength node.
     srcs: List = []
     if sources:
         srcs = [s for s in sources if s in H]
@@ -676,7 +676,7 @@ def make_energy_flow_figure_3d(
         name="nodes",
     )
 
-    # Base edges (faint).
+    # Base edges (faint, always present)
     ex, ey, ez = [], [], []
     for u, v, _ in G.edges(data=True):
         if u not in pos3d or v not in pos3d:
