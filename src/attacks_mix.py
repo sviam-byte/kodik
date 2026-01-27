@@ -195,7 +195,12 @@ def run_mix_attack(
                     H, source_edges, k_replace=k_rep, rng=rng, attrs_pool=attrs_pool
                 )
 
-        m = calculate_metrics(H, eff_sources_k=int(eff_sources_k), seed=int(seed))
+        m = calculate_metrics(
+            H,
+            eff_sources_k=int(eff_sources_k),
+            seed=int(seed),
+            compute_curvature=False,
+        )
 
         row = {
             "step": int(i),

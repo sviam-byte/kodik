@@ -86,6 +86,22 @@ def lambda2_on_lcc(G: nx.Graph) -> float:
             return 0.0
 
 
+def lcc_fraction(G: nx.Graph, N0: int) -> float:
+    """Fraction of original nodes that remain in the largest connected component (undirected view)."""
+    try:
+        N0 = int(N0)
+    except Exception:
+        N0 = 0
+    if N0 <= 0 or G.number_of_nodes() == 0:
+        return 0.0
+    H_u = G.to_undirected(as_view=False) if G.is_directed() else G
+    try:
+        lcc = max(nx.connected_components(H_u), key=len)
+        return float(len(lcc) / float(N0))
+    except Exception:
+        return 0.0
+
+
 def approx_weighted_efficiency(G: nx.Graph, sources_k: int = 32, seed: int = 0) -> float:
     N = G.number_of_nodes()
     if N < 2 or G.number_of_edges() == 0:
@@ -191,9 +207,26 @@ def _shannon_entropy_from_values(values, bins: int = 32) -> float:
     return _shannon_entropy_from_counts(hist)
 
 
-def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
+def calculate_metrics(
+    G: nx.Graph,
+    eff_sources_k: int,
+    seed: int,
+    compute_curvature: bool = True,
+    curvature_sample_edges: int = 150,
+    curvature_max_support: int = 60,
+    curvature_cutoff: float = 8.0,
+    **kwargs,
+) -> dict:
     N = G.number_of_nodes()
     E = G.number_of_edges()
+    # Back-compat: older callers used compute_heavy=True/False.
+    if "compute_heavy" in kwargs:
+        try:
+            heavy = bool(kwargs.get("compute_heavy"))
+        except Exception:
+            heavy = True
+        if not heavy:
+            compute_curvature = False
     if N > 0:
         try:
             C = (
@@ -269,14 +302,28 @@ def calculate_metrics(G: nx.Graph, eff_sources_k: int, seed: int) -> dict:
     except Exception:
         H_evo = float("nan")
 
-    try:
-        curv = ollivier_ricci_summary(G, sample_edges=150, seed=int(seed), max_support=60, cutoff=8.0)
-        kappa_mean = float(curv.kappa_mean)
-        kappa_median = float(curv.kappa_median)
-        kappa_frac_negative = float(curv.kappa_frac_negative)
-        kappa_computed_edges = int(curv.computed_edges)
-        kappa_skipped_edges = int(curv.skipped_edges)
-    except Exception:
+    if compute_curvature and G.number_of_edges() > 0:
+        try:
+            curv = ollivier_ricci_summary(
+                G,
+                sample_edges=int(curvature_sample_edges),
+                seed=int(seed),
+                max_support=int(curvature_max_support),
+                cutoff=float(curvature_cutoff),
+            )
+            kappa_mean = float(curv.kappa_mean)
+            kappa_median = float(curv.kappa_median)
+            kappa_frac_negative = float(curv.kappa_frac_negative)
+            kappa_computed_edges = int(curv.computed_edges)
+            kappa_skipped_edges = int(curv.skipped_edges)
+        except Exception:
+            kappa_mean = float("nan")
+            kappa_median = float("nan")
+            kappa_frac_negative = float("nan")
+            kappa_computed_edges = 0
+            kappa_skipped_edges = 0
+    else:
+        # Curvature is the main latency driver (LP/EMD per edge). Keep it opt-in.
         kappa_mean = float("nan")
         kappa_median = float("nan")
         kappa_frac_negative = float("nan")

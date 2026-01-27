@@ -73,10 +73,18 @@ def _metrics_cached(
     min_weight: float,
     analysis_mode: str,
     seed: int,
+    compute_curvature: bool,
+    curvature_sample_edges: int,
 ) -> dict:
     """Cache heavy metrics separately from graph construction."""
     G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
-    return calculate_metrics(G, eff_sources_k=32, seed=int(seed))
+    return calculate_metrics(
+        G,
+        eff_sources_k=32,
+        seed=int(seed),
+        compute_curvature=bool(compute_curvature),
+        curvature_sample_edges=int(curvature_sample_edges),
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -338,13 +346,26 @@ def _fallback_removal_order(G: nx.Graph, kind: str, seed: int):
     rng.shuffle(nodes)
     return nodes
 
-def _compute_metrics_snapshot(G: nx.Graph, eff_k: int, seed: int, heavy: bool):
+def _compute_metrics_snapshot(
+    G: nx.Graph,
+    eff_k: int,
+    seed: int,
+    heavy: bool,
+    compute_curvature: bool,
+    curvature_sample_edges: int,
+):
     """
     Safe wrapper around calculate_metrics.
     If heavy=False: we still call calculate_metrics, but pass smaller eff_k upstream (already controlled by caller).
     Heavy gating is handled by caller by skipping/ffill some columns.
     """
-    m = calculate_metrics(G, eff_sources_k=int(eff_k), seed=int(seed))
+    m = calculate_metrics(
+        G,
+        eff_sources_k=int(eff_k),
+        seed=int(seed),
+        compute_curvature=bool(compute_curvature and heavy),
+        curvature_sample_edges=int(curvature_sample_edges),
+    )
     return m
 
 def run_edge_attack(
@@ -403,7 +424,14 @@ def run_edge_attack(
         removed_frac = (k / total_e) if total_e else 0.0
 
         heavy = (i % int(max(1, compute_heavy_every)) == 0) or (i == steps)
-        m = _compute_metrics_snapshot(H, eff_k=eff_k, seed=seed, heavy=heavy)
+        m = _compute_metrics_snapshot(
+            H,
+            eff_k=eff_k,
+            seed=seed,
+            heavy=heavy,
+            compute_curvature=bool(st.session_state.get("__compute_curvature", False)),
+            curvature_sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
+        )
 
         row = {
             "step": i,
@@ -585,7 +613,14 @@ def emulate_node_attack_from_order(
 
         removed_frac = (k / N0) if N0 else 0.0
         heavy = (i % int(max(1, compute_heavy_every)) == 0) or (i == int(steps))
-        m = _compute_metrics_snapshot(H, eff_k=eff_k, seed=seed, heavy=heavy)
+        m = _compute_metrics_snapshot(
+            H,
+            eff_k=eff_k,
+            seed=seed,
+            heavy=heavy,
+            compute_curvature=bool(st.session_state.get("__compute_curvature", False)),
+            curvature_sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
+        )
 
         row = {
             "step": i,
@@ -880,6 +915,28 @@ with st.sidebar:
     st.session_state["seed"] = int(seed_val)
 
     st.markdown("---")
+    st.markdown("**🐢 Тяжёлые метрики**")
+    if "__compute_curvature" not in st.session_state:
+        st.session_state["__compute_curvature"] = False
+    if "__curvature_sample_edges" not in st.session_state:
+        st.session_state["__curvature_sample_edges"] = 80
+    compute_curv = st.checkbox(
+        "Считать Ollivier–Ricci κ (очень медленно)",
+        value=bool(st.session_state["__compute_curvature"]),
+    )
+    st.session_state["__compute_curvature"] = bool(compute_curv)
+    curv_edges = int(st.session_state["__curvature_sample_edges"])
+    if compute_curv:
+        curv_edges = st.slider(
+            "κ: сколько рёбер сэмплировать",
+            min_value=20,
+            max_value=300,
+            value=int(curv_edges),
+            step=10,
+        )
+    st.session_state["__curvature_sample_edges"] = int(curv_edges)
+
+    st.markdown("---")
     # Stop-crane: prevent automatic heavy recomputation on every UI change.
     graph_key = (
         f"{active_entry['id']}|{df_hash}|{src_col}|{dst_col}|"
@@ -925,6 +982,8 @@ if run_calc:
             float(min_weight),
             analysis_mode,
             int(seed_val),
+            bool(st.session_state.get("__compute_curvature", False)),
+            int(st.session_state.get("__curvature_sample_edges", 80)),
         )
     st.session_state[metrics_cache_key] = met
 elif metrics_cache_key in st.session_state:

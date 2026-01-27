@@ -238,7 +238,12 @@ def run_attack(
 
             heavy = (step % max(1, int(compute_heavy_every)) == 0)
             if heavy:
-                met = calculate_metrics(H, eff_sources_k=int(eff_sources_k), seed=int(seed))
+                met = calculate_metrics(
+                    H,
+                    eff_sources_k=int(eff_sources_k),
+                    seed=int(seed),
+                    compute_curvature=False,
+                )
             else:
                 met = {
                     "N": H.number_of_nodes(),
@@ -314,7 +319,12 @@ def run_attack(
         heavy = (step % max(1, int(compute_heavy_every)) == 0)
 
         if heavy:
-            met = calculate_metrics(G_curr, eff_sources_k=int(eff_sources_k), seed=int(seed))
+            met = calculate_metrics(
+                G_curr,
+                eff_sources_k=int(eff_sources_k),
+                seed=int(seed),
+                compute_curvature=False,
+            )
         else:
             # cheap metrics
             met = {
