@@ -16,8 +16,8 @@ def _hash_nx_graph(G: nx.Graph) -> str:
     NetworkX graphs contain mutable dicts, so Streamlit's default hasher may
     fail with UnhashableParamError.
 
-    We hash a deterministic serialization of nodes and edges (including edge
-    attributes) so the result is stable across runs and process boundaries.
+    We hash a deterministic serialization of graph, node, and edge attributes
+    so the result is stable across runs and process boundaries.
     """
     h = hashlib.sha256()
 
@@ -25,10 +25,55 @@ def _hash_nx_graph(G: nx.Graph) -> str:
     h.update(b"1" if G.is_directed() else b"0")
     h.update(b"\n")
 
+    def _hash_value(value) -> None:
+        """Update the hash with a stable serialization of common types."""
+        if isinstance(value, dict):
+            h.update(b"{")
+            for key in sorted(value.keys(), key=lambda x: str(x)):
+                h.update(str(key).encode("utf-8", errors="replace"))
+                h.update(b":")
+                _hash_value(value[key])
+                h.update(b",")
+            h.update(b"}")
+            return
+        if isinstance(value, (list, tuple)):
+            h.update(b"[")
+            for item in value:
+                _hash_value(item)
+                h.update(b",")
+            h.update(b"]")
+            return
+        if isinstance(value, (set, frozenset)):
+            h.update(b"set(")
+            for item in sorted(value, key=lambda x: str(x)):
+                _hash_value(item)
+                h.update(b",")
+            h.update(b")")
+            return
+        if isinstance(value, np.ndarray):
+            h.update(b"ndarray:")
+            h.update(str(value.dtype).encode("utf-8", errors="replace"))
+            h.update(b":")
+            h.update(str(value.shape).encode("utf-8", errors="replace"))
+            h.update(b":")
+            h.update(value.tobytes())
+            return
+
+        h.update(repr(value).encode("utf-8", errors="replace"))
+
+    # Graph-level attributes are part of the cache key.
+    if G.graph:
+        h.update(b"graph:")
+        _hash_value(G.graph)
+        h.update(b"\n")
+
     # Nodes are hashed in a stable order by stringified label.
-    for n in sorted(G.nodes(), key=lambda x: str(x)):
+    for n, attrs in sorted(G.nodes(data=True), key=lambda x: str(x[0])):
         h.update(b"N:")
         h.update(str(n).encode("utf-8", errors="replace"))
+        if attrs:
+            h.update(b"|")
+            _hash_value(attrs)
         h.update(b"\n")
 
     # Edges + attributes (sorted for determinism across graph types).
@@ -67,11 +112,7 @@ def _hash_nx_graph(G: nx.Graph) -> str:
             h.update(str(k).encode("utf-8", errors="replace"))
         h.update(b"|")
         if d:
-            for attr_key in sorted(d.keys(), key=lambda x: str(x)):
-                h.update(str(attr_key).encode("utf-8", errors="replace"))
-                h.update(b"=")
-                h.update(repr(d.get(attr_key)).encode("utf-8", errors="replace"))
-                h.update(b";")
+            _hash_value(d)
         h.update(b"\n")
 
     return h.hexdigest()
