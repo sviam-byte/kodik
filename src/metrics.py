@@ -552,6 +552,341 @@ def compute_energy_flow(
     return node_energy, edge_flux
 
 
+# ============================================================
+# Energy flow (animated 3D): PHYSICAL pressure/flow
+# ============================================================
+def _simulate_energy_physical(
+    G: nx.Graph,
+    steps: int,
+    damping: float,
+    sources: Optional[List],
+    cap_mode: str = "strength",
+    injection: float = 0.15,
+    leak: float = 0.02,
+) -> Tuple[List[Dict], List[Dict[Tuple, float]]]:
+    """
+    Physical-ish flow:
+      pressure_i = E_i / (cap_i + eps)
+      flow_{u->v} = w_uv * (pressure_u - pressure_v)
+      E update by net flow + injection at sources - leak everywhere
+    We store edge_flux as |flow| for visualization.
+    """
+    H = _as_undirected_simple(G)
+    nodes = list(H.nodes())
+    if not nodes:
+        return [], []
+
+    # Capacity model.
+    if cap_mode == "degree":
+        cap = {n: float(H.degree(n)) for n in nodes}
+    else:
+        # Default: weighted strength.
+        cap = {n: float(H.degree(n, weight="weight")) for n in nodes}
+    eps = 1e-9
+
+    # Sources: user-provided subset, else top-strength node.
+    srcs: List = []
+    if sources:
+        srcs = [s for s in sources if s in H]
+    if not srcs:
+        srcs = [max(cap, key=cap.get)] if cap else [nodes[0]]
+
+    # Initialize energy.
+    E = {n: 0.0 for n in nodes}
+    for s in srcs:
+        E[s] += 1.0 / float(len(srcs))
+
+    damp = float(damping)
+    if not np.isfinite(damp):
+        damp = 1.0
+    damp = max(0.0, min(1.0, damp))
+
+    steps = int(max(0, steps))
+
+    node_frames: List[Dict] = []
+    edge_frames: List[Dict[Tuple, float]] = []
+
+    for t in range(steps + 1):
+        # Snapshot at current energies.
+        node_frames.append({n: float(E.get(n, 0.0)) for n in nodes})
+
+        # Compute pressures.
+        P = {n: float(E[n]) / (cap.get(n, 0.0) + eps) for n in nodes}
+
+        # Compute flows and accumulate dE.
+        dE = {n: 0.0 for n in nodes}
+        edge_flux: Dict[Tuple, float] = {}
+        for u, v, d in H.edges(data=True):
+            w = d.get("weight", 1.0)
+            try:
+                w = float(w)
+            except Exception:
+                w = 1.0
+            # Signed flow from u->v.
+            f = w * (P[u] - P[v])
+            dE[u] -= f
+            dE[v] += f
+            edge_flux[(u, v)] = float(abs(f))
+
+        edge_frames.append(edge_flux)
+
+        if t == steps:
+            break
+
+        # Update energies: net flow + injection/leak.
+        for n in nodes:
+            E[n] = E[n] + dE[n]
+            if n in srcs:
+                E[n] += float(injection) / float(len(srcs))
+            E[n] = E[n] * damp
+            E[n] = max(0.0, E[n] - float(leak))
+
+    return node_frames, edge_frames
+
+
+# ============================================================
+# Energy flow (animated 3D)
+# ============================================================
+def simulate_energy_flow(
+    G: nx.Graph,
+    steps: int = 25,
+    flow_mode: str = "rw",
+    damping: float = 1.0,
+    sources: Optional[List] = None,
+) -> Tuple[List[Dict], List[Dict[Tuple, float]]]:
+    """Per-step node energies + per-step edge fluxes (for Plotly frames).
+
+    Output lengths: steps+1 for t = 0..steps.
+    """
+    fm = str(flow_mode).lower().strip()
+    if fm in ("phys", "pressure", "flow"):
+        return _simulate_energy_physical(
+            G,
+            steps=int(steps),
+            damping=float(damping),
+            sources=sources,
+            cap_mode="strength",
+            injection=0.15,
+            leak=0.02,
+        )
+
+    H = _as_undirected_simple(G)
+    nodes = list(H.nodes())
+    if not nodes:
+        return [], []
+
+    # Sources: user-provided subset, else top-strength node.
+    srcs: List = []
+    if sources:
+        srcs = [s for s in sources if s in H]
+    if not srcs:
+        strengths = dict(H.degree(weight="weight"))
+        srcs = [max(strengths, key=strengths.get)] if strengths else [nodes[0]]
+
+    steps = int(max(0, steps))
+
+    if str(flow_mode).lower().startswith("evo"):
+        P, _pi = _pf_markov(H, nodes)
+    else:
+        P = _rw_transition_matrix(H, nodes)
+
+    n = len(nodes)
+    idx = {nodes[i]: i for i in range(n)}
+
+    e = np.zeros(n, dtype=float)
+    for s in srcs:
+        e[idx[s]] += 1.0 / float(len(srcs))
+
+    damp = float(damping)
+    if not np.isfinite(damp):
+        damp = 1.0
+    damp = max(0.0, min(1.0, damp))
+
+    node_frames: List[Dict] = []
+    edge_frames: List[Dict[Tuple, float]] = []
+
+    def _snapshot(evec: np.ndarray) -> Tuple[Dict, Dict[Tuple, float]]:
+        node_energy = {nodes[i]: float(evec[i]) for i in range(n)}
+        edge_flux: Dict[Tuple, float] = {}
+        for u, v in H.edges():
+            iu = idx[u]
+            iv = idx[v]
+            f_uv = float(evec[iu] * P[iu, iv])
+            f_vu = float(evec[iv] * P[iv, iu])
+            edge_flux[(u, v)] = max(f_uv, f_vu)
+        return node_energy, edge_flux
+
+    ne0, ef0 = _snapshot(e)
+    node_frames.append(ne0)
+    edge_frames.append(ef0)
+
+    for _ in range(steps):
+        e = e @ P
+        if damp != 1.0:
+            e = e * damp
+        ne, ef = _snapshot(e)
+        node_frames.append(ne)
+        edge_frames.append(ef)
+
+    return node_frames, edge_frames
+
+
+def make_energy_flow_figure_3d(
+    G: nx.Graph,
+    pos3d: dict,
+    *,
+    steps: int = 25,
+    flow_mode: str = "rw",
+    damping: float = 1.0,
+    sources: Optional[List] = None,
+    node_size: int = 6,
+    edge_bins: int = 7,
+    height: int = 820,
+) -> go.Figure:
+    """Animated 3D Plotly figure: node energy + edge flux overlay."""
+    if G.number_of_nodes() == 0:
+        return go.Figure()
+
+    node_frames, edge_frames = simulate_energy_flow(
+        G,
+        steps=int(steps),
+        flow_mode=str(flow_mode),
+        damping=float(damping),
+        sources=sources,
+    )
+
+    nodes = [n for n in G.nodes() if n in pos3d]
+    xs = [pos3d[n][0] for n in nodes]
+    ys = [pos3d[n][1] for n in nodes]
+    zs = [pos3d[n][2] for n in nodes]
+
+    e0 = node_frames[0] if node_frames else {}
+    c0 = [float(e0.get(n, 0.0)) for n in nodes]
+
+    node_trace = go.Scatter3d(
+        x=xs,
+        y=ys,
+        z=zs,
+        mode="markers",
+        marker=dict(
+            size=int(node_size),
+            color=c0,
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(title="energy"),
+        ),
+        text=[str(n) for n in nodes],
+        hoverinfo="text",
+        name="nodes",
+    )
+
+    # Base edges (faint, always present)
+    ex, ey, ez = [], [], []
+    for u, v, _ in G.edges(data=True):
+        if u not in pos3d or v not in pos3d:
+            continue
+        ex += [pos3d[u][0], pos3d[v][0], None]
+        ey += [pos3d[u][1], pos3d[v][1], None]
+        ez += [pos3d[u][2], pos3d[v][2], None]
+    base_edges = go.Scatter3d(
+        x=ex,
+        y=ey,
+        z=ez,
+        mode="lines",
+        line=dict(width=2, color="rgba(150,150,150,0.25)"),
+        hoverinfo="none",
+        name="edges",
+    )
+
+    overlay0 = _build_edge_overlay_traces(
+        pos3d,
+        edge_frames[0] if edge_frames else {},
+        nbins=int(edge_bins),
+    )
+
+    frames = []
+    for t in range(len(node_frames)):
+        et = node_frames[t]
+        ct = [float(et.get(n, 0.0)) for n in nodes]
+
+        overlays = _build_edge_overlay_traces(
+            pos3d,
+            edge_frames[t] if t < len(edge_frames) else {},
+            nbins=int(edge_bins),
+        )
+
+        fr_data = []
+        fr_data.append(
+            go.Scatter3d(
+                x=xs,
+                y=ys,
+                z=zs,
+                mode="markers",
+                marker=dict(
+                    size=int(node_size),
+                    color=ct,
+                    colorscale="Viridis",
+                    showscale=False,
+                ),
+                hoverinfo="skip",
+                name="nodes",
+            )
+        )
+        fr_data.append(base_edges)
+        fr_data.extend(overlays)
+        frames.append(go.Frame(data=fr_data, name=str(t)))
+
+    fig = go.Figure(data=[node_trace, base_edges, *overlay0], frames=frames)
+    fig.update_layout(
+        template="plotly_dark",
+        height=int(height),
+        margin=dict(l=0, r=0, t=30, b=0),
+        showlegend=False,
+        scene=dict(
+            xaxis=dict(showbackground=False, showticklabels=False, title=""),
+            yaxis=dict(showbackground=False, showticklabels=False, title=""),
+            zaxis=dict(showbackground=False, showticklabels=False, title=""),
+        ),
+        updatemenus=[
+            dict(
+                type="buttons",
+                showactive=False,
+                y=0.02,
+                x=0.02,
+                xanchor="left",
+                yanchor="bottom",
+                buttons=[
+                    dict(
+                        label="Play",
+                        method="animate",
+                        args=[None, {"frame": {"duration": 120, "redraw": True}, "fromcurrent": True}],
+                    ),
+                    dict(
+                        label="Pause",
+                        method="animate",
+                        args=[[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
+                    ),
+                ],
+            )
+        ],
+        sliders=[
+            dict(
+                active=0,
+                y=0.02,
+                x=0.18,
+                len=0.78,
+                pad={"b": 10, "t": 0},
+                currentvalue={"prefix": "t="},
+                steps=[
+                    {"args": [[str(t)], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}], "label": str(t), "method": "animate"}
+                    for t in range(len(node_frames))
+                ],
+            )
+        ],
+    )
+    return fig
+
+
 def _build_edge_overlay_traces(
     pos3d: dict,
     edge_values: Dict[Tuple, float],

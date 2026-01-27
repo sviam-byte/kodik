@@ -65,12 +65,19 @@ def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     name = (filename or "").lower()
 
     if name.endswith(".csv"):
-        # Fast path: avoid expensive dialect sniffing on large CSV files.
+        # Fast path: try comma-separated first (fast C parser).
+        # If delimiter is wrong (common with ';' in connectome CSVs), the file collapses into 1 column.
         bio = io.BytesIO(file_bytes)
         try:
             df = pd.read_csv(bio, engine="c", low_memory=True)
+            # Heuristic: wrong delimiter -> single-column dataframe.
+            if df.shape[1] <= 1:
+                df = _read_csv_fast_with_encoding_fallback(file_bytes)
         except UnicodeDecodeError:
             # Fallback keeps global compatibility for non-UTF8 CSVs.
+            df = _read_csv_fast_with_encoding_fallback(file_bytes)
+        except Exception:
+            # ParserError / quoting issues / etc.
             df = _read_csv_fast_with_encoding_fallback(file_bytes)
     elif name.endswith(".xlsx") or name.endswith(".xls"):
         bio = io.BytesIO(file_bytes)
