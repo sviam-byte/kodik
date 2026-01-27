@@ -28,7 +28,14 @@ from compute import compute_curvature as compute_curvature_cached
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
-from src.metrics import calculate_metrics, compute_3d_layout, make_3d_traces
+from src.metrics import (
+    calculate_metrics,
+    compute_3d_layout,
+    compute_energy_flow,
+    make_3d_traces,
+    make_energy_flow_figure_3d,
+)
+from src.robust_geom import ollivier_ricci_edge
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
 from src.attacks import run_attack 
 from src.attacks_mix import run_mix_attack
@@ -385,7 +392,7 @@ def run_edge_attack(
 ):
     """
     Edge-removal attack:
-    - kind: weak_edges_by_weight / weak_edges_by_confidence / strong_edges_by_weight / strong_edges_by_confidence
+    - kind: weak/strong by weight/confidence OR Ricci/flux-based rankings
     - returns df_hist, aux
     aux contains removed_edges_order (list of (u,v)) used for 3D decomposition.
     """
@@ -395,14 +402,101 @@ def run_edge_attack(
 
     H0 = _as_simple_undirected(G)
     edges = list(H0.edges(data=True))
+    kind = str(kind)
 
-    if "confidence" in kind:
-        key = lambda e: float(e[2].get("confidence", 1.0))
+    def _sf(x, default: float = 0.0) -> float:
+        """Safe float conversion with finite fallback."""
+        try:
+            v = float(x)
+            if not np.isfinite(v):
+                return float(default)
+            return v
+        except Exception:
+            return float(default)
+
+    # --------------------------
+    # Cheap rankings by attributes
+    # --------------------------
+    if kind in (
+        "weak_edges_by_weight",
+        "weak_edges_by_confidence",
+        "strong_edges_by_weight",
+        "strong_edges_by_confidence",
+    ):
+        if "confidence" in kind:
+            key = lambda e: _sf(e[2].get("confidence", 1.0), 1.0)
+        else:
+            key = lambda e: _sf(e[2].get("weight", 1.0), 1.0)
+
+        reverse = kind.startswith("strong_")
+        edges.sort(key=key, reverse=reverse)
+
     else:
-        key = lambda e: float(e[2].get("weight", 1.0))
+        # --------------------------
+        # Expensive rankings: Ricci / Flux
+        # --------------------------
+        rng = np.random.default_rng(int(seed))
+        max_eval = 600  # Cap edge curvature evaluations for speed.
+        edge_list = [(u, v) for (u, v, _d) in edges]
+        if len(edge_list) > max_eval:
+            sample_idx = rng.choice(len(edge_list), size=max_eval, replace=False)
+            sampled = [edge_list[i] for i in sample_idx]
+        else:
+            sampled = edge_list
 
-    reverse = kind.startswith("strong_")
-    edges.sort(key=key, reverse=reverse)
+        kappa = {}
+        flux = {}
+
+        # Flux precompute (RW / Evo).
+        if kind in ("flux_high_rw", "flux_high_evo", "flux_high_rw_x_neg_ricci"):
+            fm = "evo" if kind.endswith("_evo") else "rw"
+            try:
+                _ne, ef = compute_energy_flow(H0, steps=20, flow_mode=fm, damping=1.0)
+                flux = dict(ef)
+            except Exception:
+                flux = {}
+
+        # Curvature on sampled edges.
+        if kind.startswith("ricci_") or kind == "flux_high_rw_x_neg_ricci":
+            for (u, v) in sampled:
+                try:
+                    val = ollivier_ricci_edge(H0, u, v, max_support=60, cutoff=8.0)
+                except Exception:
+                    val = None
+                if val is None or not np.isfinite(val):
+                    continue
+                kappa[(u, v)] = float(val)
+
+        def _flux_uv(u, v) -> float:
+            if (u, v) in flux:
+                return _sf(flux[(u, v)], 0.0)
+            if (v, u) in flux:
+                return _sf(flux[(v, u)], 0.0)
+            return 0.0
+
+        def _kappa_uv(u, v) -> float:
+            if (u, v) in kappa:
+                return _sf(kappa[(u, v)], 0.0)
+            if (v, u) in kappa:
+                return _sf(kappa[(v, u)], 0.0)
+            return 0.0
+
+        def score(u, v, d) -> float:
+            if kind == "flux_high_rw":
+                return _flux_uv(u, v)
+            if kind == "flux_high_evo":
+                return _flux_uv(u, v)
+            if kind == "ricci_most_negative":
+                return -_kappa_uv(u, v)
+            if kind == "ricci_most_positive":
+                return _kappa_uv(u, v)
+            if kind == "ricci_abs_max":
+                return abs(_kappa_uv(u, v))
+            if kind == "flux_high_rw_x_neg_ricci":
+                return _flux_uv(u, v) * max(0.0, -_kappa_uv(u, v))
+            return _sf(d.get("weight", 1.0), 1.0)
+
+        edges.sort(key=lambda e: score(e[0], e[1], e[2]), reverse=True)
 
     total_e = len(edges)
     remove_total = int(round(float(frac) * total_e))
@@ -1302,6 +1396,55 @@ with tab_struct:
             else:
                 st.write("Граф пуст.")
 
+        with st.expander("⚡ Течение энергии (3D-анимация)", expanded=False):
+            st.caption("Анимация диффузии/потока по графу: узлы окрашены по энергии, рёбра — по потоку (flux).")
+            c1, c2, c3 = st.columns([1, 1, 2])
+            with c1:
+                flow_mode_ui = st.selectbox("Модель", ["rw", "evo"], index=0)
+                flow_steps = st.slider("Шаги", 1, 80, 25)
+            with c2:
+                flow_damp = st.slider("Damping", 0.0, 1.0, 1.0, 0.05)
+                flow_bins = st.slider("Bins (рёбра)", 3, 12, 7)
+            with c3:
+                src_mode = st.selectbox("Источники", ["top_strength", "top_k_strength", "random_k"], index=0)
+                k_src = st.slider("k источников", 1, 25, 3)
+
+            sources = None
+            try:
+                Hs = _as_simple_undirected(G_view)
+                strengths = dict(Hs.degree(weight="weight"))
+                if strengths:
+                    if src_mode == "top_strength":
+                        sources = [max(strengths, key=strengths.get)]
+                    elif src_mode == "top_k_strength":
+                        sources = [
+                            n
+                            for n, _ in sorted(strengths.items(), key=lambda kv: kv[1], reverse=True)[: int(k_src)]
+                        ]
+                    else:
+                        rng = np.random.default_rng(int(seed_val))
+                        nodes_pool = list(strengths.keys())
+                        if nodes_pool:
+                            kk = int(min(int(k_src), len(nodes_pool)))
+                            sources = [nodes_pool[i] for i in rng.choice(len(nodes_pool), size=kk, replace=False)]
+            except Exception:
+                sources = None
+
+            if st.button("▶️ Построить анимацию", use_container_width=True):
+                with st.spinner("Собираю кадры…"):
+                    fig_flow = make_energy_flow_figure_3d(
+                        G_view,
+                        pos3d,
+                        steps=int(flow_steps),
+                        flow_mode=str(flow_mode_ui),
+                        damping=float(flow_damp),
+                        sources=sources,
+                        node_size=int(node_size),
+                        edge_bins=int(flow_bins),
+                        height=820,
+                    )
+                st.plotly_chart(fig_flow, use_container_width=True)
+
         st.markdown("---")
         st.subheader("Матрица смежности (heatmap)")
         if G_view.number_of_nodes() < 1000 and G_view.number_of_nodes() > 0:
@@ -1439,10 +1582,16 @@ with tab_attack:
                             "weak_edges_by_confidence",
                             "strong_edges_by_weight",
                             "strong_edges_by_confidence",
+                            "ricci_most_negative (κ min)",
+                            "ricci_most_positive (κ max)",
+                            "ricci_abs_max (|κ| max)",
+                            "flux_high_rw",
+                            "flux_high_evo",
+                            "flux_high_rw_x_neg_ricci",
                         ],
                         help=help_icon("Weak edges")
                     )
-                    kind = attack_ui
+                    kind = str(attack_ui).split(" ")[0]
 
                 else:
                     kind = st.selectbox(
