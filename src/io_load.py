@@ -74,7 +74,9 @@ def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
             if df.shape[1] <= 1:
                 df = _read_csv_fast_with_encoding_fallback(file_bytes)
         except UnicodeDecodeError:
-            # Fallback keeps global compatibility for non-UTF8 CSVs.
+            df = _read_csv_fast_with_encoding_fallback(file_bytes)
+        except Exception:
+            # ParserError / quoting issues / etc.
             df = _read_csv_fast_with_encoding_fallback(file_bytes)
         except Exception:
             # ParserError / quoting issues / etc.
