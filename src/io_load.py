@@ -65,7 +65,13 @@ def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     name = (filename or "").lower()
 
     if name.endswith(".csv"):
-        df = _read_csv_fast_with_encoding_fallback(file_bytes)
+        # Fast path: avoid expensive dialect sniffing on large CSV files.
+        bio = io.BytesIO(file_bytes)
+        try:
+            df = pd.read_csv(bio, engine="c", low_memory=True)
+        except UnicodeDecodeError:
+            # Fallback keeps global compatibility for non-UTF8 CSVs.
+            df = _read_csv_fast_with_encoding_fallback(file_bytes)
     elif name.endswith(".xlsx") or name.endswith(".xls"):
         bio = io.BytesIO(file_bytes)
         df = pd.read_excel(bio)
