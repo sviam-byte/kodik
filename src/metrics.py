@@ -66,7 +66,11 @@ def lambda2_on_lcc(G: nx.Graph) -> float:
     Hs = H.subgraph(lcc).copy()
     try:
         L = nx.normalized_laplacian_matrix(Hs, weight="weight").astype(float)
-        vals = spla.eigs(L, k=min(3, L.shape[0] - 1), which="SR", return_eigenvectors=False)
+        # Shift-invert around sigma=0 to target smallest eigenvalues faster.
+        if L.shape[0] <= 2:
+            vals = np.sort(np.real(np.linalg.eigvals(L.toarray())))
+            return float(max(0.0, vals[1])) if vals.size >= 2 else 0.0
+        vals = spla.eigs(L, k=2, which="SM", sigma=0, return_eigenvectors=False)
         vals = np.sort(np.real(vals))
         if vals.size >= 2:
             return float(max(0.0, vals[1]))

@@ -1,3 +1,4 @@
+import math
 import random
 from typing import Optional
 
@@ -151,8 +152,8 @@ def pick_targets_for_attack(
     if attack_kind == "betweenness":
         H = add_dist_attr(G)
         n = H.number_of_nodes()
-        k_samples = min(200, n)
-        # approximate betweenness for speed
+        # Aggressive sampling: k ~= sqrt(n) capped for speed on large graphs.
+        k_samples = min(int(math.sqrt(n)) + 1, 100, n)
         bc = nx.betweenness_centrality(H, k=k_samples, weight="dist", normalized=True, seed=int(seed))
         return sorted(nodes, key=lambda n: bc.get(n, 0.0), reverse=True)[:step_size]
 
