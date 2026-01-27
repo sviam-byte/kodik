@@ -16,8 +16,8 @@ def _hash_nx_graph(G: nx.Graph) -> str:
     NetworkX graphs contain mutable dicts, so Streamlit's default hasher may
     fail with UnhashableParamError.
 
-    We hash a deterministic serialization of nodes and edges including edge
-    attributes.
+    We hash a deterministic serialization of graph, node, and edge attributes
+    so the result is stable across runs and process boundaries.
     """
     h = hashlib.sha256()
 
@@ -25,29 +25,94 @@ def _hash_nx_graph(G: nx.Graph) -> str:
     h.update(b"1" if G.is_directed() else b"0")
     h.update(b"\n")
 
-    # Nodes
-    for n in sorted(G.nodes(), key=lambda x: str(x)):
-        h.update(b"N:")
-        h.update(str(n).encode("utf-8", errors="replace"))
+    def _hash_value(value) -> None:
+        """Update the hash with a stable serialization of common types."""
+        if isinstance(value, dict):
+            h.update(b"{")
+            for key in sorted(value.keys(), key=lambda x: str(x)):
+                h.update(str(key).encode("utf-8", errors="replace"))
+                h.update(b":")
+                _hash_value(value[key])
+                h.update(b",")
+            h.update(b"}")
+            return
+        if isinstance(value, (list, tuple)):
+            h.update(b"[")
+            for item in value:
+                _hash_value(item)
+                h.update(b",")
+            h.update(b"]")
+            return
+        if isinstance(value, (set, frozenset)):
+            h.update(b"set(")
+            for item in sorted(value, key=lambda x: str(x)):
+                _hash_value(item)
+                h.update(b",")
+            h.update(b")")
+            return
+        if isinstance(value, np.ndarray):
+            h.update(b"ndarray:")
+            h.update(str(value.dtype).encode("utf-8", errors="replace"))
+            h.update(b":")
+            h.update(str(value.shape).encode("utf-8", errors="replace"))
+            h.update(b":")
+            h.update(value.tobytes())
+            return
+
+        h.update(repr(value).encode("utf-8", errors="replace"))
+
+    # Graph-level attributes are part of the cache key.
+    if G.graph:
+        h.update(b"graph:")
+        _hash_value(G.graph)
         h.update(b"\n")
 
-    # Edges + attributes (sorted for determinism)
-    def _edge_key(e):
-        u, v, _d = e
-        return (str(u), str(v))
+    # Nodes are hashed in a stable order by stringified label.
+    for n, attrs in sorted(G.nodes(data=True), key=lambda x: str(x[0])):
+        h.update(b"N:")
+        h.update(str(n).encode("utf-8", errors="replace"))
+        if attrs:
+            h.update(b"|")
+            _hash_value(attrs)
+        h.update(b"\n")
 
-    for u, v, d in sorted(G.edges(data=True), key=_edge_key):
+    # Edges + attributes (sorted for determinism across graph types).
+    def _edge_pair(u, v):
+        if G.is_directed():
+            return (str(u), str(v))
+        ordered = sorted((str(u), str(v)))
+        return (ordered[0], ordered[1])
+
+    if G.is_multigraph():
+        def _edge_key(e):
+            u, v, k, _d = e
+            return (*_edge_pair(u, v), str(k))
+
+        edges = G.edges(keys=True, data=True)
+    else:
+        def _edge_key(e):
+            u, v, _d = e
+            return _edge_pair(u, v)
+
+        edges = G.edges(data=True)
+
+    for edge in sorted(edges, key=_edge_key):
+        if G.is_multigraph():
+            u, v, k, d = edge
+        else:
+            u, v, d = edge
+            k = None
+
         h.update(b"E:")
         h.update(str(u).encode("utf-8", errors="replace"))
         h.update(b"->")
         h.update(str(v).encode("utf-8", errors="replace"))
+        if k is not None:
+            h.update(b"#")
+            h.update(str(k).encode("utf-8", errors="replace"))
         h.update(b"|")
         if d:
-            for k in sorted(d.keys(), key=lambda x: str(x)):
-                h.update(str(k).encode("utf-8", errors="replace"))
-                h.update(b"=")
-                h.update(repr(d.get(k)).encode("utf-8", errors="replace"))
-                h.update(b";")
+            _hash_value(d)
         h.update(b"\n")
 
     return h.hexdigest()
@@ -63,13 +128,21 @@ def build_graph(df: pd.DataFrame) -> nx.Graph:
     return nx.from_pandas_edgelist(df, "src", "dst", edge_attr=True)
 
 
-@st.cache_data(show_spinner=False, hash_funcs={nx.Graph: _hash_nx_graph})
+_NX_HASH_FUNCS = {
+    nx.Graph: _hash_nx_graph,
+    nx.DiGraph: _hash_nx_graph,
+    nx.MultiGraph: _hash_nx_graph,
+    nx.MultiDiGraph: _hash_nx_graph,
+}
+
+
+@st.cache_data(show_spinner=False, hash_funcs=_NX_HASH_FUNCS)
 def compute_layout(G: nx.Graph) -> dict:
     """Compute and cache a deterministic 2D layout for quick preview plots."""
     return nx.spring_layout(G, seed=42)
 
 
-@st.cache_data(show_spinner=False, hash_funcs={nx.Graph: _hash_nx_graph})
+@st.cache_data(show_spinner=False, hash_funcs=_NX_HASH_FUNCS)
 def compute_curvature(
     G: nx.Graph,
     sample_edges: int = 150,
