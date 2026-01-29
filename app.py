@@ -970,8 +970,9 @@ def render_top_bar():
 active_entry = render_top_bar()
 if not active_entry:
     # Важно: не останавливаем приложение ДО создания табов.
-    tab_main, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
+    tab_main, tab_energy, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
         "📊 Дэшборд",
+        "⚡ Energy & Dynamics",
         "🕸️ Структура и 3D",
         "🧪 Нулевые модели",
         "💥 Attack Lab",
@@ -979,6 +980,8 @@ if not active_entry:
     ])
     with tab_main:
         st.warning("Workspace пуст. Слева загрузи файл или создай демо-граф.")
+    with tab_energy:
+        st.info("Сначала нужен граф в Workspace (вкладка Energy & Dynamics).")
     with tab_struct:
         st.info("Сначала нужен граф в Workspace.")
     with tab_null:
@@ -1158,13 +1161,13 @@ if met is not None:
 # ============================================================
 # 8) MAIN TABS (Attack/Compare are in PART 2)
 # ============================================================
-tab_main, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
+tab_main, tab_energy, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
     "📊 Дэшборд",
+    "⚡ Energy & Dynamics",
     "🕸️ Структура и 3D",
     "🧪 Нулевые модели",
     "💥 Attack Lab",
     "🆚 Сравнение",
-    
 ])
 
 # ------------------------------
@@ -1304,6 +1307,105 @@ with tab_main:
                 st.info("Нет весов")
 
 # ------------------------------
+# TAB: ENERGY & DYNAMICS
+# ------------------------------
+with tab_energy:
+    st.header("Energy & Dynamics")
+    if G_view is None:
+        st.info("Нажми в сайдбаре **Load graph**. Здесь появятся модели потока/энергии и динамические метрики.")
+    else:
+        st.caption("Режим **phys**: pressure/flow по рёбрам (аналог электрической сети). Режимы **rw/evo**: диффузия.")
+
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        with c1:
+            flow_mode_ui = st.selectbox("Модель", ["phys", "rw", "evo"], index=0)
+            flow_steps = st.slider("Шаги", 1, 120, 40)
+        with c2:
+            flow_damp = st.slider("Damping", 0.0, 1.0, 0.98, 0.01)
+            edge_bins = st.slider("Bins (цвет рёбер)", 3, 10, 6)
+        with c3:
+            node_size_energy = st.slider("Размер узлов", 1, 20, 6)
+            max_edges_viz = st.slider("Рёбер в 3D", 300, 12000, 2500, 100)
+            frame_stride = st.slider("Stride кадров", 1, 10, 2)
+        with c4:
+            edge_subset_mode = st.selectbox("Выбор рёбер", ["top_weight", "random"], index=0)
+
+        st.markdown("**Источники энергии**")
+        s1, s2 = st.columns([2, 2])
+        with s1:
+            src_mode = st.selectbox("Sources", ["top_strength", "top_k_strength", "random_k"], index=0)
+        with s2:
+            k_src = st.slider("k", 1, 25, 3)
+
+        sources = None
+        try:
+            Hs = _as_simple_undirected(G_view)
+            strengths = dict(Hs.degree(weight="weight"))
+            if strengths:
+                if src_mode == "top_strength":
+                    sources = [max(strengths, key=strengths.get)]
+                elif src_mode == "top_k_strength":
+                    sources = [n for n, _ in sorted(strengths.items(), key=lambda kv: kv[1], reverse=True)[: int(k_src)]]
+                else:
+                    rng = np.random.default_rng(int(seed_val))
+                    nodes_pool = list(strengths.keys())
+                    if nodes_pool:
+                        kk = int(min(int(k_src), len(nodes_pool)))
+                        sources = [nodes_pool[i] for i in rng.choice(len(nodes_pool), size=kk, replace=False)]
+        except Exception:
+            sources = None
+
+        # Extra phys params (only shown for phys).
+        if str(flow_mode_ui) == "phys":
+            p1, p2, p3 = st.columns([1, 1, 1])
+            with p1:
+                phys_inj = st.slider("Injection", 0.0, 1.0, 0.15, 0.01)
+            with p2:
+                phys_leak = st.slider("Leak", 0.0, 0.2, 0.02, 0.005)
+            with p3:
+                phys_cap = st.selectbox("Capacity", ["strength", "degree"], index=0)
+            st.session_state["__phys_injection"] = float(phys_inj)
+            st.session_state["__phys_leak"] = float(phys_leak)
+            st.session_state["__phys_cap"] = str(phys_cap)
+
+        run_btn = st.button("▶️ Запустить динамику (3D)", type="primary", use_container_width=True)
+        if run_btn:
+            with st.spinner("Считаю потоки и собираю 3D…"):
+                base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
+                pos3d_local = _layout_cached(
+                    active_entry["id"],
+                    df_hash,
+                    src_col,
+                    dst_col,
+                    float(min_conf),
+                    float(min_weight),
+                    analysis_mode,
+                    base_seed,
+                )
+                fig_flow = make_energy_flow_figure_3d(
+                    G_view,
+                    pos3d_local,
+                    steps=int(flow_steps),
+                    flow_mode=str(flow_mode_ui),
+                    damping=float(flow_damp),
+                    sources=sources,
+                    phys_injection=float(st.session_state.get("__phys_injection", 0.15)),
+                    phys_leak=float(st.session_state.get("__phys_leak", 0.02)),
+                    phys_cap_mode=str(st.session_state.get("__phys_cap", "strength")),
+                    node_size=int(node_size_energy),
+                    edge_bins=int(edge_bins),
+                    height=820,
+                    max_edges_viz=int(max_edges_viz),
+                    frame_stride=int(frame_stride),
+                    edge_subset_mode=str(edge_subset_mode),
+                )
+            st.plotly_chart(fig_flow, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("Атаки, завязанные на динамику")
+        st.caption("В Attack Lab доступны edge-стратегии: Ricci (κ) и Flux. Для flux используются те же модели (rw/evo) на текущем графе.")
+
+# ------------------------------
 # TAB: STRUCTURE & 3D (static)
 # ------------------------------
 with tab_struct:
@@ -1413,60 +1515,6 @@ with tab_struct:
                 st.plotly_chart(fig_3d, use_container_width=True)
             else:
                 st.write("Граф пуст.")
-
-        with st.expander("⚡ Течение энергии (3D-анимация)", expanded=False):
-            st.caption("Анимация диффузии/потока по графу: узлы окрашены по энергии, рёбра — по потоку (flux).")
-            c1, c2, c3 = st.columns([1, 1, 2])
-            with c1:
-                flow_mode_ui = st.selectbox(
-                    "Модель",
-                    ["phys", "rw", "evo"],
-                    index=0,
-                    help="phys: pressure/flow по рёбрам; rw/evo: диффузия.",
-                )
-                flow_steps = st.slider("Шаги", 1, 80, 25)
-            with c2:
-                flow_damp = st.slider("Damping", 0.0, 1.0, 1.0, 0.05)
-                flow_bins = st.slider("Bins (рёбра)", 3, 12, 7)
-            with c3:
-                src_mode = st.selectbox("Источники", ["top_strength", "top_k_strength", "random_k"], index=0)
-                k_src = st.slider("k источников", 1, 25, 3)
-
-            sources = None
-            try:
-                Hs = _as_simple_undirected(G_view)
-                strengths = dict(Hs.degree(weight="weight"))
-                if strengths:
-                    if src_mode == "top_strength":
-                        sources = [max(strengths, key=strengths.get)]
-                    elif src_mode == "top_k_strength":
-                        sources = [
-                            n
-                            for n, _ in sorted(strengths.items(), key=lambda kv: kv[1], reverse=True)[: int(k_src)]
-                        ]
-                    else:
-                        rng = np.random.default_rng(int(seed_val))
-                        nodes_pool = list(strengths.keys())
-                        if nodes_pool:
-                            kk = int(min(int(k_src), len(nodes_pool)))
-                            sources = [nodes_pool[i] for i in rng.choice(len(nodes_pool), size=kk, replace=False)]
-            except Exception:
-                sources = None
-
-            if st.button("▶️ Построить анимацию", use_container_width=True):
-                with st.spinner("Собираю кадры…"):
-                    fig_flow = make_energy_flow_figure_3d(
-                        G_view,
-                        pos3d,
-                        steps=int(flow_steps),
-                        flow_mode=str(flow_mode_ui),
-                        damping=float(flow_damp),
-                        sources=sources,
-                        node_size=int(node_size),
-                        edge_bins=int(flow_bins),
-                        height=820,
-                    )
-                st.plotly_chart(fig_flow, use_container_width=True)
 
         st.markdown("---")
         st.subheader("Матрица смежности (heatmap)")
