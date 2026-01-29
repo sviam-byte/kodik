@@ -1,7 +1,7 @@
 # src/metrics.py
 import math
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import networkx as nx
@@ -653,10 +653,14 @@ def simulate_energy_flow(
     flow_mode: str = "rw",
     damping: float = 1.0,
     sources: Optional[List] = None,
+    phys_injection: float = 0.15,
+    phys_leak: float = 0.02,
+    phys_cap_mode: str = "strength",
 ) -> Tuple[List[Dict], List[Dict[Tuple, float]]]:
     """Per-step node energies + per-step edge fluxes (for Plotly frames).
 
     Output lengths: steps+1 for t = 0..steps.
+    Physical mode parameters are forwarded to the pressure/flow simulator.
     """
     fm = str(flow_mode).lower().strip()
     if fm in ("phys", "pressure", "flow"):
@@ -665,9 +669,9 @@ def simulate_energy_flow(
             steps=int(steps),
             damping=float(damping),
             sources=sources,
-            cap_mode="strength",
-            injection=0.15,
-            leak=0.02,
+            cap_mode=str(phys_cap_mode),
+            injection=float(phys_injection),
+            leak=float(phys_leak),
         )
 
     H = _as_undirected_simple(G)
@@ -736,14 +740,26 @@ def make_energy_flow_figure_3d(
     pos3d: dict,
     *,
     steps: int = 25,
-    flow_mode: str = "rw",
+    flow_mode: str = "phys",
     damping: float = 1.0,
     sources: Optional[List] = None,
+    phys_injection: float = 0.15,
+    phys_leak: float = 0.02,
+    phys_cap_mode: str = "strength",
     node_size: int = 6,
     edge_bins: int = 7,
     height: int = 820,
+    max_edges_viz: int = 3000,
+    frame_stride: int = 2,
+    edge_subset_mode: str = "top_weight",
 ) -> go.Figure:
-    """Animated 3D Plotly figure: node energy + edge flux overlay."""
+    """Animated 3D Plotly figure: node energy + edge flux overlay.
+
+    Performance controls:
+      - max_edges_viz: limits rendered edges (base + overlays).
+      - frame_stride: uses every k-th frame to reduce Plotly frame count.
+      - edge_subset_mode: 'top_weight' (default) or 'random'.
+    """
     if G.number_of_nodes() == 0:
         return go.Figure()
 
@@ -753,6 +769,9 @@ def make_energy_flow_figure_3d(
         flow_mode=str(flow_mode),
         damping=float(damping),
         sources=sources,
+        phys_injection=float(phys_injection),
+        phys_leak=float(phys_leak),
+        phys_cap_mode=str(phys_cap_mode),
     )
 
     nodes = [n for n in G.nodes() if n in pos3d]
@@ -780,11 +799,35 @@ def make_energy_flow_figure_3d(
         name="nodes",
     )
 
-    # Base edges (faint, always present)
-    ex, ey, ez = [], [], []
-    for u, v, _ in G.edges(data=True):
+    # --------------------------
+    # Edge subset for rendering
+    # --------------------------
+    edges_all = []
+    for u, v, data in G.edges(data=True):
         if u not in pos3d or v not in pos3d:
             continue
+        weight = data.get("weight", 1.0)
+        try:
+            weight = float(weight)
+        except Exception:
+            weight = 1.0
+        edges_all.append((u, v, weight))
+
+    max_edges_viz = int(max(0, max_edges_viz))
+    edge_subset_mode = str(edge_subset_mode).lower().strip()
+    if max_edges_viz and len(edges_all) > max_edges_viz:
+        if edge_subset_mode == "random":
+            rng = np.random.default_rng(12345)
+            idx = rng.choice(len(edges_all), size=max_edges_viz, replace=False)
+            edges_vis = [edges_all[i] for i in idx]
+        else:
+            edges_vis = sorted(edges_all, key=lambda t: t[2], reverse=True)[:max_edges_viz]
+    else:
+        edges_vis = edges_all
+
+    # Base edges (faint, always present).
+    ex, ey, ez = [], [], []
+    for u, v, _ in edges_vis:
         ex += [pos3d[u][0], pos3d[v][0], None]
         ey += [pos3d[u][1], pos3d[v][1], None]
         ez += [pos3d[u][2], pos3d[v][2], None]
@@ -802,10 +845,16 @@ def make_energy_flow_figure_3d(
         pos3d,
         edge_frames[0] if edge_frames else {},
         nbins=int(edge_bins),
+        allowed_edges={(u, v) for u, v, _ in edges_vis},
     )
 
+    # --------------------------
+    # Frames (downsampled)
+    # --------------------------
+    frame_stride = int(max(1, frame_stride))
+    frame_ids = list(range(0, len(node_frames), frame_stride))
     frames = []
-    for t in range(len(node_frames)):
+    for t in frame_ids:
         et = node_frames[t]
         ct = [float(et.get(n, 0.0)) for n in nodes]
 
@@ -813,6 +862,7 @@ def make_energy_flow_figure_3d(
             pos3d,
             edge_frames[t] if t < len(edge_frames) else {},
             nbins=int(edge_bins),
+            allowed_edges={(u, v) for u, v, _ in edges_vis},
         )
 
         fr_data = []
@@ -879,7 +929,7 @@ def make_energy_flow_figure_3d(
                 currentvalue={"prefix": "t="},
                 steps=[
                     {"args": [[str(t)], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}], "label": str(t), "method": "animate"}
-                    for t in range(len(node_frames))
+                    for t in frame_ids
                 ],
             )
         ],
@@ -891,10 +941,19 @@ def _build_edge_overlay_traces(
     pos3d: dict,
     edge_values: Dict[Tuple, float],
     nbins: int = 7,
+    allowed_edges: Optional[Set[Tuple]] = None,
 ) -> List[go.Scatter3d]:
-    """Build colored edge traces by binning edge_values into nbins."""
+    """Build colored edge traces by binning edge_values into nbins.
+
+    When allowed_edges is provided, only those edges (undirected) are rendered.
+    """
     if not edge_values:
         return []
+
+    if allowed_edges is not None:
+        edge_values = {k: v for k, v in edge_values.items() if k in allowed_edges or (k[1], k[0]) in allowed_edges}
+        if not edge_values:
+            return []
 
     vals = list(edge_values.values())
     vmin, vmax = float(np.min(vals)), float(np.max(vals))
