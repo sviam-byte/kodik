@@ -1347,11 +1347,25 @@ with tab_main:
 # TAB: ENERGY & DYNAMICS
 # ------------------------------
 with tab_energy:
-    st.header("Energy & Dynamics")
+    st.header("⚡ Динамика и распространение сигналов")
     if G_view is None:
-        st.info("Нажми в сайдбаре **Load graph**. Здесь появятся модели потока/энергии и динамические метрики.")
+        st.info("Сначала загрузите граф в сайдбаре (Load graph).")
     else:
-        st.caption("Режим **phys**: pressure/flow по рёбрам (аналог электрической сети). Режимы **rw/evo**: диффузия.")
+        st.markdown(
+            """
+            Этот модуль имитирует, как «энергия» (информация, вирус, ток) течет по вашей сети.
+            Помогает найти **узкие места** и **магистрали**.
+            """
+        )
+        st.info(
+            """
+            💡 **Как это читать?**
+            - **Яркие узлы (Hotspots):** центры скопления энергии или высокого давления.
+            - **Линии (Flux):** направление основного потока. Чем ярче линия, тем больше энергии проходит через связь.
+            - **Режим phys:** модель водопровода — энергия течет туда, где меньше «давление».
+            - **Режим rw:** диффузия (случайное блуждание) — энергия растекается по соседям.
+            """
+        )
 
         # Автоподстройка производительности под размер графа.
         N = int(G_view.number_of_nodes())
@@ -1363,89 +1377,128 @@ with tab_energy:
         else:
             _steps_def, _stride_def, _edges_def = 40, 2, 2500
 
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-        with c1:
-            flow_mode_ui = st.selectbox("Модель", ["phys", "rw", "evo"], index=0)
-            flow_steps = st.slider("Шаги", 1, 120, int(_steps_def))
-        with c2:
-            flow_damp = st.slider("Damping", 0.0, 1.0, 0.98, 0.01)
-            edge_bins = st.slider("Bins (цвет рёбер)", 3, 10, 6)
-        with c3:
-            node_size_energy = st.slider("Размер узлов", 1, 20, 6)
-            max_edges_viz = st.slider("Рёбер в 3D", 300, 12000, int(_edges_def), 100)
-            frame_stride = st.slider("Stride кадров", 1, 10, int(_stride_def))
-        with c4:
-            edge_subset_mode = st.selectbox("Подмножество рёбер", ["top_weight", "top_flux", "random"], index=0)
-            show_labels = st.checkbox("Подписи узлов", value=False)
+        # --- БЛОК 1: ВЫБОР МОДЕЛИ ---
+        with st.expander("📝 1. Настройка модели (Что считаем?)", expanded=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                flow_mode_ui = st.selectbox(
+                    "Алгоритм течения",
+                    ["phys", "rw", "evo"],
+                    help=(
+                        "- phys: как ток в проводах или вода в трубах (по закону Ома/Кирхгофа).\n"
+                        "- rw: диффузия (случайное блуждание).\n"
+                        "- evo: переходы с учетом Perron-Frobenius."
+                    ),
+                )
+            with col2:
+                rw_impulse = st.toggle(
+                    "Режим импульса",
+                    value=True,
+                    help="ВКЛ: энергия дается один раз (всплеск). ВЫКЛ: постоянный приток из источника.",
+                )
 
-        st.markdown("**Запуск и видимость распространения:**")
-        vc1, vc2, vc3, vc4 = st.columns([1, 1, 1, 1])
-        with vc1:
-            rw_impulse = st.checkbox("Импульс (один запуск)", value=True)
-        with vc2:
-            hotspot_q = st.slider("Hotspots: верхний квантиль", 0.70, 0.99, 0.92, 0.01)
-        with vc3:
-            hotspot_mult = st.slider("Hotspots: размер ×", 1.5, 8.0, 4.0, 0.5)
-        with vc4:
-            base_opacity = st.slider("Фоновые узлы: прозрачность", 0.05, 0.8, 0.25, 0.05)
-
-        # Управление визуальным контрастом и устойчивым нормированием энергии.
-        st.markdown("**Визуальное усиление энергии:**")
-        vc1, vc2, vc3 = st.columns([1, 1, 1])
-        with vc1:
-            vis_contrast = st.slider("Контраст", 0.2, 6.0, 2.0, 0.1)
-        with vc2:
-            vis_clip = st.slider("Клип по процентилям", 0.0, 0.20, 0.06, 0.01)
-        with vc3:
-            vis_log = st.checkbox("log(1+x)", value=True)
-
-        # --------------------------
-        # Sources as persistent state + quick add/reset
-        # --------------------------
-        if "energy_sources" not in st.session_state:
-            st.session_state["energy_sources"] = []
-
-        st.markdown("**Источники энергии (узлы):**")
-        sc1, sc2, sc3 = st.columns([2, 1, 1])
-        with sc1:
-            quick_src = st.selectbox(
-                "Быстро выбрать один источник",
-                options=["—"] + list(G_view.nodes()),
-                index=0,
-                key="__quick_src_pick",
-            )
-        with sc2:
-            if st.button("➕ Добавить", key="__src_add_btn"):
-                if quick_src != "—" and quick_src not in st.session_state["energy_sources"]:
-                    st.session_state["energy_sources"].append(quick_src)
-        with sc3:
-            if st.button("🧹 Сбросить", key="__src_reset_btn"):
+        # --- БЛОК 2: ИСТОЧНИКИ ---
+        with st.expander("📍 2. Точки впрыска (Откуда течет?)", expanded=True):
+            if "energy_sources" not in st.session_state:
                 st.session_state["energy_sources"] = []
 
-        sources = st.multiselect(
-            "Текущие источники (можно несколько)",
-            options=list(G_view.nodes()),
-            default=list(st.session_state["energy_sources"]),
-            key="__energy_sources_multiselect",
-        )
-        st.session_state["energy_sources"] = list(sources)
-        st.caption("Если список пуст, источник выбирается автоматически по максимальной силе.")
+            sc1, sc2 = st.columns([3, 1])
+            with sc1:
+                sources = st.multiselect(
+                    "Выберите узлы-источники",
+                    options=list(G_view.nodes()),
+                    default=st.session_state.get("energy_sources", []),
+                    help="Если оставить пустым, программа выберет самый сильный узел автоматически.",
+                )
+                st.session_state["energy_sources"] = list(sources)
+            with sc2:
+                if st.button("🧹 Сброс"):
+                    st.session_state["energy_sources"] = []
+                    st.rerun()
 
-        # Extra phys params (only shown for phys).
+        # --- БЛОК 3: ВИЗУАЛИЗАЦИЯ ---
+        st.subheader("🎨 Настройка видимости")
+        vcol1, vcol2, vcol3 = st.columns(3)
+
+        with vcol1:
+            vis_contrast = st.slider(
+                "Контраст (Gamma)",
+                0.5,
+                8.0,
+                3.0,
+                0.1,
+                help="Чем выше, тем ярче будут видны даже слабые потоки.",
+            )
+            vis_clip = st.slider(
+                "Клип (верхний порог)",
+                0.0,
+                0.1,
+                0.01,
+                0.01,
+                help="Обрезает самые яркие точки, чтобы они не ослепляли остальную карту.",
+            )
+            vis_log = st.checkbox(
+                "Логарифмическая шкала",
+                value=True,
+                help="Сжимает экстремальные значения перед нормализацией.",
+            )
+        with vcol2:
+            node_size_energy = st.slider("Размер узлов", 1, 30, 8)
+            base_opacity = st.slider(
+                "Фон (скелет графа)",
+                0.0,
+                1.0,
+                0.4,
+                help="Прозрачность неактивных узлов.",
+            )
+            hotspot_mult = st.slider("Hotspots: размер ×", 1.5, 8.0, 4.0, 0.5)
+        with vcol3:
+            hotspot_q = st.slider(
+                "Порог «горячих точек»",
+                0.5,
+                0.99,
+                0.95,
+                help="Верхний процент самых энергичных узлов, которые выделяются особо ярко.",
+            )
+            edge_subset_mode = st.selectbox(
+                "Какие ребра рисовать?",
+                ["top_flux", "top_weight", "random"],
+                index=0,
+                help="top_flux: показывать только те пути, по которым реально течет энергия.",
+            )
+
+        # --- БЛОК 4: ФИЗИКА ---
         if str(flow_mode_ui) == "phys":
-            p1, p2, p3 = st.columns([1, 1, 1])
-            with p1:
-                phys_inj = st.slider("Injection", 0.0, 1.0, 0.15, 0.01)
-            with p2:
-                phys_leak = st.slider("Leak", 0.0, 0.2, 0.02, 0.005)
-            with p3:
-                phys_cap = st.selectbox("Capacity", ["strength", "degree"], index=0)
-            st.session_state["__phys_injection"] = float(phys_inj)
-            st.session_state["__phys_leak"] = float(phys_leak)
-            st.session_state["__phys_cap"] = str(phys_cap)
+            with st.expander("⚙️ 3. Параметры физической модели", expanded=True):
+                p1, p2, p3 = st.columns([1, 1, 1])
+                with p1:
+                    phys_inj = st.slider("Injection", 0.0, 1.0, 0.15, 0.01)
+                with p2:
+                    phys_leak = st.slider("Leak", 0.0, 0.2, 0.02, 0.005)
+                with p3:
+                    phys_cap = st.selectbox("Capacity", ["strength", "degree"], index=0)
+                st.caption(
+                    "Если всё серое: увеличьте Injection до 1.0 и уменьшите Leak до 0.0."
+                )
+                st.session_state["__phys_injection"] = float(phys_inj)
+                st.session_state["__phys_leak"] = float(phys_leak)
+                st.session_state["__phys_cap"] = str(phys_cap)
 
-        run_btn = st.button("▶️ Запустить динамику (3D)", type="primary", use_container_width=True)
-        if run_btn:
+        # --- БЛОК 5: ПРОИЗВОДИТЕЛЬНОСТЬ ---
+        with st.expander("🚀 4. Производительность и рендер", expanded=False):
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c1:
+                flow_steps = st.slider("Шаги", 1, 120, int(_steps_def))
+                flow_damp = st.slider("Damping", 0.0, 1.0, 0.98, 0.01)
+            with c2:
+                edge_bins = st.slider("Bins (цвет рёбер)", 3, 10, 6)
+                max_edges_viz = st.slider("Рёбер в 3D", 300, 12000, int(_edges_def), 100)
+            with c3:
+                frame_stride = st.slider("Stride кадров", 1, 10, int(_stride_def))
+                show_labels = st.checkbox("Подписи узлов", value=False)
+
+        # Запуск
+        if st.button("▶ ЗАПУСТИТЬ СИМУЛЯЦИЮ", type="primary", use_container_width=True):
             with st.spinner("Считаю потоки и собираю 3D…"):
                 base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
                 pos3d_local = _layout_cached(
@@ -1506,6 +1559,15 @@ with tab_energy:
             ph.plotly_chart(fig_flow, use_container_width=True, key="plot_energy_flow")
 
         st.markdown("---")
+        with st.expander("💡 Как интерпретировать результат?"):
+            st.markdown(
+                """
+                1. **Если всё черное:** увеличьте `Контраст` или проверьте, что `Injection` (в режиме phys) больше 0.
+                2. **Если горит только один узел:** увеличьте `Клип (верхний порог)`. Это значит, источник слишком мощный и «забивает» шкалу.
+                3. **Если много «мусора»:** выберите режим ребер `top_flux`, чтобы оставить только главные магистрали.
+                4. **Яркие пульсирующие точки:** это «хабы» или ловушки, где энергия накапливается дольше всего.
+                """
+            )
         st.subheader("Атаки, завязанные на динамику")
         st.caption("В Attack Lab доступны edge-стратегии: Ricci (κ) и Flux. Для flux используются те же модели (rw/evo) на текущем графе.")
 

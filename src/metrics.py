@@ -786,7 +786,7 @@ def make_energy_flow_figure_3d(
 
     Visual controls:
       - vis_contrast: gamma-like contrast (>1 highlights subtle differences).
-      - vis_clip: symmetric percentile clipping for robust normalization.
+      - vis_clip: upper-tail clipping for robust normalization.
       - vis_log: log(1+x) compresses outliers before normalization.
       - hotspot_q: quantile for hotspot highlighting (higher = fewer nodes).
       - hotspot_size_mult: hotspot marker size multiplier.
@@ -808,18 +808,16 @@ def make_energy_flow_figure_3d(
         return arr
 
     def _robust_unit(arr: np.ndarray, clip: float) -> np.ndarray:
-        """Normalize to [0,1] using symmetric percentile clipping."""
+        """Normalize to [0,1] by fixing zero and clipping only the upper tail."""
         if arr.size == 0:
             return arr
         clip = float(clip)
-        clip = max(0.0, min(0.49, clip))
-        lo = np.quantile(arr, clip)
-        hi = np.quantile(arr, 1.0 - clip)
-        if not np.isfinite(lo):
-            lo = 0.0
-        if not np.isfinite(hi) or hi <= lo:
-            hi = lo + 1e-12
-        normed = (arr - lo) / (hi - lo)
+        clip = max(0.0, min(1.0, clip))
+        v_min = 0.0
+        v_max = np.quantile(arr, 1.0 - clip) if clip < 1.0 else np.max(arr)
+        if not np.isfinite(v_max) or v_max <= v_min:
+            v_max = np.max(arr) + 1e-12
+        normed = (arr - v_min) / (v_max - v_min)
         return np.clip(normed, 0.0, 1.0)
 
     def _boost01(arr: np.ndarray, contrast: float) -> np.ndarray:
