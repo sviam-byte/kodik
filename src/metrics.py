@@ -750,6 +750,10 @@ def make_energy_flow_figure_3d(
     phys_cap_mode: str = "strength",
     node_size: int = 6,
     edge_bins: int = 7,
+    vis_contrast: float = 2.0,
+    vis_clip: float = 0.06,
+    vis_log: bool = True,
+    show_labels: bool = False,
     height: int = 820,
     max_edges_viz: int = 3000,
     frame_stride: int = 2,
@@ -757,13 +761,57 @@ def make_energy_flow_figure_3d(
 ) -> go.Figure:
     """Animated 3D Plotly figure: node energy + edge flux overlay.
 
+    Visual controls:
+      - vis_contrast: gamma-like contrast (>1 highlights subtle differences).
+      - vis_clip: symmetric percentile clipping for robust normalization.
+      - vis_log: log(1+x) compresses outliers before normalization.
+      - show_labels: toggles node labels for readability/perf trade-off.
+
     Performance controls:
       - max_edges_viz: limits rendered edges (base + overlays).
       - frame_stride: uses every k-th frame to reduce Plotly frame count.
-      - edge_subset_mode: 'top_weight' (default) or 'random'.
+      - edge_subset_mode: 'top_weight', 'top_flux', or 'random'.
     """
     if G.number_of_nodes() == 0:
         return go.Figure()
+
+    def _as_float_array(vals: List[float]) -> np.ndarray:
+        """Return a finite float array (non-finite values become zero)."""
+        arr = np.array([float(v) for v in vals], dtype=float)
+        arr[~np.isfinite(arr)] = 0.0
+        return arr
+
+    def _robust_unit(arr: np.ndarray, clip: float) -> np.ndarray:
+        """Normalize to [0,1] using symmetric percentile clipping."""
+        if arr.size == 0:
+            return arr
+        clip = float(clip)
+        clip = max(0.0, min(0.49, clip))
+        lo = np.quantile(arr, clip)
+        hi = np.quantile(arr, 1.0 - clip)
+        if not np.isfinite(lo):
+            lo = 0.0
+        if not np.isfinite(hi) or hi <= lo:
+            hi = lo + 1e-12
+        normed = (arr - lo) / (hi - lo)
+        return np.clip(normed, 0.0, 1.0)
+
+    def _boost01(arr: np.ndarray, contrast: float) -> np.ndarray:
+        """Apply gamma-like contrast within [0,1] (contrast>1 boosts differences)."""
+        contrast = float(contrast)
+        if not np.isfinite(contrast) or contrast <= 0:
+            contrast = 1.0
+        return np.power(arr, 1.0 / contrast)
+
+    def _prep_energy_for_colors(energy_map: Dict) -> List[float]:
+        """Convert energy dict into visually boosted [0,1] colors."""
+        vals = [float(energy_map.get(n, 0.0)) for n in nodes]
+        arr = _as_float_array(vals)
+        if vis_log:
+            arr = np.log1p(np.maximum(arr, 0.0))
+        arr = _robust_unit(arr, vis_clip)
+        arr = _boost01(arr, vis_contrast)
+        return [float(v) for v in arr]
 
     # Reuse precomputed frames when provided to avoid resimulating on UI-only changes.
     if node_frames is None or edge_frames is None:
@@ -784,7 +832,7 @@ def make_energy_flow_figure_3d(
     zs = [pos3d[n][2] for n in nodes]
 
     e0 = node_frames[0] if node_frames else {}
-    c0 = [float(e0.get(n, 0.0)) for n in nodes]
+    c0 = _prep_energy_for_colors(e0) if node_frames else [0.0 for _ in nodes]
 
     node_trace = go.Scatter3d(
         x=xs,
@@ -802,11 +850,14 @@ def make_energy_flow_figure_3d(
         hoverinfo="text",
         name="nodes",
     )
+    if show_labels:
+        node_trace.update(mode="markers+text", textposition="top center")
 
     # --------------------------
     # Edge subset for rendering
     # --------------------------
     edges_all = []
+    flux_map = edge_frames[0] if edge_frames else {}
     for u, v, data in G.edges(data=True):
         if u not in pos3d or v not in pos3d:
             continue
@@ -815,7 +866,8 @@ def make_energy_flow_figure_3d(
             weight = float(weight)
         except Exception:
             weight = 1.0
-        edges_all.append((u, v, weight))
+        flux_val = float(flux_map.get((u, v), flux_map.get((v, u), 0.0)))
+        edges_all.append((u, v, weight, flux_val))
 
     max_edges_viz = int(max(0, max_edges_viz))
     edge_subset_mode = str(edge_subset_mode).lower().strip()
@@ -824,6 +876,8 @@ def make_energy_flow_figure_3d(
             rng = np.random.default_rng(12345)
             idx = rng.choice(len(edges_all), size=max_edges_viz, replace=False)
             edges_vis = [edges_all[i] for i in idx]
+        elif edge_subset_mode == "top_flux":
+            edges_vis = sorted(edges_all, key=lambda t: t[3], reverse=True)[:max_edges_viz]
         else:
             edges_vis = sorted(edges_all, key=lambda t: t[2], reverse=True)[:max_edges_viz]
     else:
@@ -831,7 +885,7 @@ def make_energy_flow_figure_3d(
 
     # Base edges (faint, always present).
     ex, ey, ez = [], [], []
-    for u, v, _ in edges_vis:
+    for u, v, _, _ in edges_vis:
         ex += [pos3d[u][0], pos3d[v][0], None]
         ey += [pos3d[u][1], pos3d[v][1], None]
         ez += [pos3d[u][2], pos3d[v][2], None]
@@ -849,7 +903,10 @@ def make_energy_flow_figure_3d(
         pos3d,
         edge_frames[0] if edge_frames else {},
         nbins=int(edge_bins),
-        allowed_edges={(u, v) for u, v, _ in edges_vis},
+        allowed_edges={(u, v) for u, v, _, _ in edges_vis},
+        vis_contrast=float(vis_contrast),
+        vis_clip=float(vis_clip),
+        vis_log=bool(vis_log),
     )
 
     # --------------------------
@@ -860,32 +917,37 @@ def make_energy_flow_figure_3d(
     frames = []
     for t in frame_ids:
         et = node_frames[t]
-        ct = [float(et.get(n, 0.0)) for n in nodes]
+        ct = _prep_energy_for_colors(et)
 
         overlays = _build_edge_overlay_traces(
             pos3d,
             edge_frames[t] if t < len(edge_frames) else {},
             nbins=int(edge_bins),
-            allowed_edges={(u, v) for u, v, _ in edges_vis},
+            allowed_edges={(u, v) for u, v, _, _ in edges_vis},
+            vis_contrast=float(vis_contrast),
+            vis_clip=float(vis_clip),
+            vis_log=bool(vis_log),
         )
 
         fr_data = []
-        fr_data.append(
-            go.Scatter3d(
-                x=xs,
-                y=ys,
-                z=zs,
-                mode="markers",
-                marker=dict(
-                    size=int(node_size),
-                    color=ct,
-                    colorscale="Viridis",
-                    showscale=False,
-                ),
-                hoverinfo="skip",
-                name="nodes",
-            )
+        node_frame_kwargs = dict(
+            x=xs,
+            y=ys,
+            z=zs,
+            mode=node_trace.mode,
+            marker=dict(
+                size=int(node_size),
+                color=ct,
+                colorscale="Viridis",
+                showscale=False,
+            ),
+            text=[str(n) for n in nodes],
+            hoverinfo="skip",
+            name="nodes",
         )
+        if show_labels:
+            node_frame_kwargs["textposition"] = "top center"
+        fr_data.append(go.Scatter3d(**node_frame_kwargs))
         fr_data.append(base_edges)
         fr_data.extend(overlays)
         frames.append(go.Frame(data=fr_data, name=str(t)))
@@ -946,10 +1008,14 @@ def _build_edge_overlay_traces(
     edge_values: Dict[Tuple, float],
     nbins: int = 7,
     allowed_edges: Optional[Set[Tuple]] = None,
+    vis_contrast: Optional[float] = None,
+    vis_clip: Optional[float] = None,
+    vis_log: Optional[bool] = None,
 ) -> List[go.Scatter3d]:
     """Build colored edge traces by binning edge_values into nbins.
 
     When allowed_edges is provided, only those edges (undirected) are rendered.
+    If vis_* settings are provided, apply robust scaling to emphasize differences.
     """
     if not edge_values:
         return []
@@ -964,33 +1030,73 @@ def _build_edge_overlay_traces(
     if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
         vmin, vmax = vmin - 1.0, vmax + 1.0
 
-    bins = np.linspace(vmin, vmax, int(max(2, nbins)) + 1)
-    colors = pc.sample_colorscale(
-        "Viridis",
-        [i / max(1, (len(bins) - 2)) for i in range(len(bins) - 1)],
-    )
+    def _as_float_array(values: List[float]) -> np.ndarray:
+        """Return finite float array; invalid entries become zeros."""
+        arr = np.array([float(v) for v in values], dtype=float)
+        arr[~np.isfinite(arr)] = 0.0
+        return arr
+
+    def _robust_unit(arr: np.ndarray, clip: float) -> np.ndarray:
+        """Normalize to [0,1] with percentile clipping for stable contrast."""
+        clip = max(0.0, min(0.49, float(clip)))
+        lo = np.quantile(arr, clip)
+        hi = np.quantile(arr, 1.0 - clip)
+        if not np.isfinite(lo):
+            lo = 0.0
+        if not np.isfinite(hi) or hi <= lo:
+            hi = lo + 1e-12
+        return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+
+    def _boost01(arr: np.ndarray, contrast: float) -> np.ndarray:
+        """Gamma-like contrast on [0,1] values."""
+        contrast = float(contrast)
+        if not np.isfinite(contrast) or contrast <= 0:
+            contrast = 1.0
+        return np.power(arr, 1.0 / contrast)
+
+    if vis_contrast is None and vis_clip is None and vis_log is None:
+        bins = np.linspace(vmin, vmax, int(max(2, nbins)) + 1)
+        colors = pc.sample_colorscale(
+            "Viridis",
+            [i / max(1, (len(bins) - 2)) for i in range(len(bins) - 1)],
+        )
+        normed = None
+    else:
+        arr = _as_float_array(vals)
+        if bool(vis_log):
+            arr = np.log1p(np.maximum(arr, 0.0))
+        arr = _robust_unit(arr, float(vis_clip or 0.0))
+        arr = _boost01(arr, float(vis_contrast or 1.0))
+        normed = arr
+        bins = np.linspace(0.0, 1.0, int(max(2, nbins)) + 1)
+        colors = pc.sample_colorscale(
+            "Viridis",
+            [i / max(1, (len(bins) - 2)) for i in range(len(bins) - 1)],
+        )
 
     traces: List[go.Scatter3d] = []
     for bi in range(len(bins) - 1):
         lo, hi = bins[bi], bins[bi + 1]
         xs, ys, zs = [], [], []
-        for (u, v), val in edge_values.items():
+        for idx, ((u, v), val) in enumerate(edge_values.items()):
             if u not in pos3d or v not in pos3d:
                 continue
-            if (val >= lo and val < hi) or (bi == len(bins) - 2 and val <= hi):
+            val_check = normed[idx] if normed is not None else val
+            if (val_check >= lo and val_check < hi) or (bi == len(bins) - 2 and val_check <= hi):
                 x0, y0, z0 = pos3d[u]
                 x1, y1, z1 = pos3d[v]
                 xs.extend([x0, x1, None])
                 ys.extend([y0, y1, None])
                 zs.extend([z0, z1, None])
         if xs:
+            width = float(1.0 + bi * 1.1) if normed is not None else 2.0
             traces.append(
                 go.Scatter3d(
                     x=xs,
                     y=ys,
                     z=zs,
                     mode="lines",
-                    line=dict(color=colors[bi], width=2),
+                    line=dict(color=colors[bi], width=width),
                     hoverinfo="none",
                     showlegend=False,
                 )

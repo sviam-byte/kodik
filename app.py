@@ -1373,7 +1373,18 @@ with tab_energy:
             max_edges_viz = st.slider("Рёбер в 3D", 300, 12000, int(_edges_def), 100)
             frame_stride = st.slider("Stride кадров", 1, 10, int(_stride_def))
         with c4:
-            edge_subset_mode = st.selectbox("Выбор рёбер", ["top_weight", "random"], index=0)
+            edge_subset_mode = st.selectbox("Подмножество рёбер", ["top_weight", "top_flux", "random"], index=0)
+            show_labels = st.checkbox("Подписи узлов", value=False)
+
+        # Управление визуальным контрастом и устойчивым нормированием энергии.
+        st.markdown("**Визуальное усиление энергии:**")
+        vc1, vc2, vc3 = st.columns([1, 1, 1])
+        with vc1:
+            vis_contrast = st.slider("Контраст", 0.2, 6.0, 2.0, 0.1)
+        with vc2:
+            vis_clip = st.slider("Клип по процентилям", 0.0, 0.20, 0.06, 0.01)
+        with vc3:
+            vis_log = st.checkbox("log(1+x)", value=True)
 
         st.markdown("**Источники энергии**")
         s1, s2 = st.columns([2, 2])
@@ -1458,10 +1469,14 @@ with tab_energy:
                     phys_cap_mode=str(st.session_state.get("__phys_cap", "strength")),
                     node_size=int(node_size_energy),
                     edge_bins=int(edge_bins),
+                    vis_contrast=float(vis_contrast),
+                    vis_clip=float(vis_clip),
+                    vis_log=bool(vis_log),
                     height=820,
                     max_edges_viz=int(max_edges_viz),
                     frame_stride=int(frame_stride),
                     edge_subset_mode=str(edge_subset_mode),
+                    show_labels=bool(show_labels),
                 )
             st.plotly_chart(fig_flow, use_container_width=True)
 
