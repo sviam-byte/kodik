@@ -141,6 +141,7 @@ def _energy_frames_cached(
     phys_injection: float,
     phys_leak: float,
     phys_cap_mode: str,
+    rw_impulse: bool,
 ) -> tuple[list[dict], list[dict]]:
     """Cache heavy energy frames separately to avoid re-simulating on UI tweaks."""
     G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
@@ -154,6 +155,7 @@ def _energy_frames_cached(
         phys_injection=float(phys_injection),
         phys_leak=float(phys_leak),
         phys_cap_mode=str(phys_cap_mode),
+        rw_impulse=bool(rw_impulse),
     )
     return node_frames, edge_frames
 
@@ -1327,7 +1329,7 @@ with tab_main:
                 fig_deg = px.histogram(x=degrees, nbins=30, title="Degree Distribution", labels={'x': 'Degree', 'y': 'Count'})
                 fig_deg.update_layout(template="plotly_dark")
                 _apply_plot_defaults(fig_deg, height=620)
-                st.plotly_chart(fig_deg, use_container_width=True)
+                st.plotly_chart(fig_deg, use_container_width=True, key="plot_deg_hist")
             else:
                 st.info("Пустой граф")
 
@@ -1337,7 +1339,7 @@ with tab_main:
                 fig_w = px.histogram(x=weights, nbins=30, title="Weight Distribution", labels={'x': 'Weight', 'y': 'Count'})
                 fig_w.update_layout(template="plotly_dark")
                 _apply_plot_defaults(fig_w, height=620)
-                st.plotly_chart(fig_w, use_container_width=True)
+                st.plotly_chart(fig_w, use_container_width=True, key="plot_weight_hist")
             else:
                 st.info("Нет весов")
 
@@ -1376,6 +1378,17 @@ with tab_energy:
             edge_subset_mode = st.selectbox("Подмножество рёбер", ["top_weight", "top_flux", "random"], index=0)
             show_labels = st.checkbox("Подписи узлов", value=False)
 
+        st.markdown("**Запуск и видимость распространения:**")
+        vc1, vc2, vc3, vc4 = st.columns([1, 1, 1, 1])
+        with vc1:
+            rw_impulse = st.checkbox("Импульс (один запуск)", value=True)
+        with vc2:
+            hotspot_q = st.slider("Hotspots: верхний квантиль", 0.70, 0.99, 0.92, 0.01)
+        with vc3:
+            hotspot_mult = st.slider("Hotspots: размер ×", 1.5, 8.0, 4.0, 0.5)
+        with vc4:
+            base_opacity = st.slider("Фоновые узлы: прозрачность", 0.05, 0.8, 0.25, 0.05)
+
         # Управление визуальным контрастом и устойчивым нормированием энергии.
         st.markdown("**Визуальное усиление энергии:**")
         vc1, vc2, vc3 = st.columns([1, 1, 1])
@@ -1386,30 +1399,37 @@ with tab_energy:
         with vc3:
             vis_log = st.checkbox("log(1+x)", value=True)
 
-        st.markdown("**Источники энергии**")
-        s1, s2 = st.columns([2, 2])
-        with s1:
-            src_mode = st.selectbox("Sources", ["top_strength", "top_k_strength", "random_k"], index=0)
-        with s2:
-            k_src = st.slider("k", 1, 25, 3)
+        # --------------------------
+        # Sources as persistent state + quick add/reset
+        # --------------------------
+        if "energy_sources" not in st.session_state:
+            st.session_state["energy_sources"] = []
 
-        sources = None
-        try:
-            Hs = _as_simple_undirected(G_view)
-            strengths = dict(Hs.degree(weight="weight"))
-            if strengths:
-                if src_mode == "top_strength":
-                    sources = [max(strengths, key=strengths.get)]
-                elif src_mode == "top_k_strength":
-                    sources = [n for n, _ in sorted(strengths.items(), key=lambda kv: kv[1], reverse=True)[: int(k_src)]]
-                else:
-                    rng = np.random.default_rng(int(seed_val))
-                    nodes_pool = list(strengths.keys())
-                    if nodes_pool:
-                        kk = int(min(int(k_src), len(nodes_pool)))
-                        sources = [nodes_pool[i] for i in rng.choice(len(nodes_pool), size=kk, replace=False)]
-        except Exception:
-            sources = None
+        st.markdown("**Источники энергии (узлы):**")
+        sc1, sc2, sc3 = st.columns([2, 1, 1])
+        with sc1:
+            quick_src = st.selectbox(
+                "Быстро выбрать один источник",
+                options=["—"] + list(G_view.nodes()),
+                index=0,
+                key="__quick_src_pick",
+            )
+        with sc2:
+            if st.button("➕ Добавить", key="__src_add_btn"):
+                if quick_src != "—" and quick_src not in st.session_state["energy_sources"]:
+                    st.session_state["energy_sources"].append(quick_src)
+        with sc3:
+            if st.button("🧹 Сбросить", key="__src_reset_btn"):
+                st.session_state["energy_sources"] = []
+
+        sources = st.multiselect(
+            "Текущие источники (можно несколько)",
+            options=list(G_view.nodes()),
+            default=list(st.session_state["energy_sources"]),
+            key="__energy_sources_multiselect",
+        )
+        st.session_state["energy_sources"] = list(sources)
+        st.caption("Если список пуст, источник выбирается автоматически по максимальной силе.")
 
         # Extra phys params (only shown for phys).
         if str(flow_mode_ui) == "phys":
@@ -1454,6 +1474,7 @@ with tab_energy:
                     phys_injection=float(st.session_state.get("__phys_injection", 0.15)),
                     phys_leak=float(st.session_state.get("__phys_leak", 0.02)),
                     phys_cap_mode=str(st.session_state.get("__phys_cap", "strength")),
+                    rw_impulse=bool(rw_impulse),
                 )
                 fig_flow = make_energy_flow_figure_3d(
                     G_view,
@@ -1472,13 +1493,17 @@ with tab_energy:
                     vis_contrast=float(vis_contrast),
                     vis_clip=float(vis_clip),
                     vis_log=bool(vis_log),
+                    hotspot_q=float(hotspot_q),
+                    hotspot_size_mult=float(hotspot_mult),
+                    base_node_opacity=float(base_opacity),
                     height=820,
                     max_edges_viz=int(max_edges_viz),
                     frame_stride=int(frame_stride),
                     edge_subset_mode=str(edge_subset_mode),
                     show_labels=bool(show_labels),
                 )
-            st.plotly_chart(fig_flow, use_container_width=True)
+            ph = st.empty()
+            ph.plotly_chart(fig_flow, use_container_width=True, key="plot_energy_flow")
 
         st.markdown("---")
         st.subheader("Атаки, завязанные на динамику")
@@ -1591,7 +1616,7 @@ with tab_struct:
                         zaxis=dict(showbackground=False, showticklabels=False, title=""),
                     ),
                 )
-                st.plotly_chart(fig_3d, use_container_width=True)
+                st.plotly_chart(fig_3d, use_container_width=True, key="plot_struct_3d")
             else:
                 st.write("Граф пуст.")
 
@@ -1601,7 +1626,7 @@ with tab_struct:
             adj = nx.adjacency_matrix(_as_simple_undirected(G_view), weight="weight").todense()
             fig_hm = px.imshow(adj, title="Adjacency Heatmap", color_continuous_scale="Viridis")
             fig_hm.update_layout(template="plotly_dark", height=760, width=760)
-            st.plotly_chart(fig_hm, use_container_width=False)
+            st.plotly_chart(fig_hm, use_container_width=False, key="plot_adj_heatmap")
         else:
             st.info("Матрица слишком большая для отображения (N >= 1000) или граф пуст.")
 
@@ -1910,7 +1935,7 @@ with tab_attack:
                 fig.update_traces(mode="lines+markers")
                 fig.update_traces(line_width=3)
                 fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"])
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="plot_attack_metrics")
 
                 st.markdown("#### AUC (robustness) по выбранной метрике")
                 y_axis = st.selectbox(
@@ -1951,7 +1976,7 @@ with tab_attack:
                         fig_lcc = px.line(df_res, x=xcol, y="lcc_frac", title="Order parameter: LCC fraction vs removed fraction")
                         fig_lcc.update_layout(template="plotly_dark")
                         fig_lcc = _apply_plot_defaults(fig_lcc, height=780, y_range=_auto_y_range(df_res["lcc_frac"]))
-                        st.plotly_chart(fig_lcc, use_container_width=True)
+                        st.plotly_chart(fig_lcc, use_container_width=True, key="plot_phase_lcc")
 
                     if xcol in df_res.columns and "lcc_frac" in df_res.columns:
                         dfp = df_res.sort_values(xcol).copy()
@@ -1961,7 +1986,7 @@ with tab_attack:
                         fig_s = px.line(dfp, x=xcol, y="suscep", title="Susceptibility proxy: d(LCC)/dx")
                         fig_s.update_layout(template="plotly_dark")
                         fig_s = _apply_plot_defaults(fig_s, height=780, y_range=_auto_y_range(dfp["suscep"]))
-                        st.plotly_chart(fig_s, use_container_width=True)
+                        st.plotly_chart(fig_s, use_container_width=True, key="plot_phase_suscep")
 
                     if "mod" in df_res.columns and "l2_lcc" in df_res.columns:
                         dfp2 = df_res.copy()
@@ -1972,7 +1997,7 @@ with tab_attack:
                             fig_phase = px.line(dfp2, x="l2_lcc", y="mod", title="Phase portrait (trajectory): Q vs λ₂")
                             fig_phase.update_layout(template="plotly_dark")
                             fig_phase = _apply_plot_defaults(fig_phase, height=780)
-                            st.plotly_chart(fig_phase, use_container_width=True)
+                            st.plotly_chart(fig_phase, use_container_width=True, key="plot_phase_portrait")
 
                 with tabC:
                     edge_overlay_ui = st.selectbox(
@@ -2047,7 +2072,7 @@ with tab_attack:
                                 fig = go.Figure(data=[*edge_traces, node_trace])
                                 fig.update_layout(template="plotly_dark", height=860, showlegend=False)
                                 fig.update_layout(title=f"Node removal | step={step_val}/{max_steps} | removed~{k_remove} | frac={frac_here:.3f}")
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_node_step")
                             else:
                                 st.info("На этом шаге граф пуст.")
 
@@ -2094,7 +2119,7 @@ with tab_attack:
                                 fig = go.Figure(data=[*edge_traces, node_trace])
                                 fig.update_layout(template="plotly_dark", height=860, showlegend=False)
                                 fig.update_layout(title=f"Edge removal | step={step_val}/{max_steps} | removed~{k_remove} edges | frac={frac_here:.3f}")
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_edge_step")
                             else:
                                 st.info("На этом шаге граф пуст.")
 
@@ -2170,7 +2195,7 @@ with tab_attack:
                 fig.update_layout(template="plotly_dark")
                 all_y = pd.concat([pd.to_numeric(df[y_axis], errors="coerce") for _, df in curves if y_axis in df.columns], ignore_index=True)
                 fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="plot_suite_compare")
 
                 st.markdown("#### AUC ranking")
                 rows = []
@@ -2290,7 +2315,7 @@ with tab_attack:
                 fig.update_layout(template="plotly_dark")
                 all_y = pd.concat([pd.to_numeric(df[y], errors="coerce") for _, df in multi_curves if y in df.columns], ignore_index=True)
                 fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="plot_multi_compare")
             else:
                 st.info("Запусти multi suite слева, чтобы увидеть сравнение.")
 
@@ -2343,7 +2368,7 @@ with tab_compare:
                 df_cmp = pd.DataFrame(rows)
                 fig_bar = px.bar(df_cmp, x="Name", y=scalar_metric, title=f"Comparison: {scalar_metric}", color="Name")
                 fig_bar.update_layout(template="plotly_dark", height=780)
-                st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig_bar, use_container_width=True, key="plot_compare_bar")
                 st.dataframe(df_cmp, use_container_width=True)
             else:
                 st.info("Выбери графы.")
@@ -2383,7 +2408,7 @@ with tab_compare:
                     fig_lines.update_layout(template="plotly_dark")
                     all_y = pd.concat([pd.to_numeric(df[y_axis], errors="coerce") for _, df in curves if y_axis in df.columns], ignore_index=True)
                     fig_lines = _apply_plot_defaults(fig_lines, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
-                    st.plotly_chart(fig_lines, use_container_width=True)
+                    st.plotly_chart(fig_lines, use_container_width=True, key="plot_compare_lines")
 
                     st.markdown("#### Robustness (AUC)")
                     auc_rows = []
