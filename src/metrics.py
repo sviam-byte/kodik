@@ -740,6 +740,8 @@ def make_energy_flow_figure_3d(
     pos3d: dict,
     *,
     steps: int = 25,
+    node_frames: Optional[List[Dict]] = None,
+    edge_frames: Optional[List[Dict[Tuple, float]]] = None,
     flow_mode: str = "phys",
     damping: float = 1.0,
     sources: Optional[List] = None,
@@ -763,16 +765,18 @@ def make_energy_flow_figure_3d(
     if G.number_of_nodes() == 0:
         return go.Figure()
 
-    node_frames, edge_frames = simulate_energy_flow(
-        G,
-        steps=int(steps),
-        flow_mode=str(flow_mode),
-        damping=float(damping),
-        sources=sources,
-        phys_injection=float(phys_injection),
-        phys_leak=float(phys_leak),
-        phys_cap_mode=str(phys_cap_mode),
-    )
+    # Reuse precomputed frames when provided to avoid resimulating on UI-only changes.
+    if node_frames is None or edge_frames is None:
+        node_frames, edge_frames = simulate_energy_flow(
+            G,
+            steps=int(steps),
+            flow_mode=str(flow_mode),
+            damping=float(damping),
+            sources=sources,
+            phys_injection=float(phys_injection),
+            phys_leak=float(phys_leak),
+            phys_cap_mode=str(phys_cap_mode),
+        )
 
     nodes = [n for n in G.nodes() if n in pos3d]
     xs = [pos3d[n][0] for n in nodes]

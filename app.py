@@ -32,6 +32,7 @@ from src.metrics import (
     calculate_metrics,
     compute_3d_layout,
     compute_energy_flow,
+    simulate_energy_flow,
     make_3d_traces,
     make_energy_flow_figure_3d,
 )
@@ -121,6 +122,40 @@ def _layout_cached(
     """Cache 3D layouts so layout recomputation does not block UI."""
     G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
     return compute_3d_layout(G, seed=int(seed))
+
+
+@st.cache_data(show_spinner=False)
+def _energy_frames_cached(
+    graph_id: str,
+    df_hash: str,
+    src_col: str,
+    dst_col: str,
+    min_conf: float,
+    min_weight: float,
+    analysis_mode: str,
+    *,
+    steps: int,
+    flow_mode: str,
+    damping: float,
+    sources: tuple,
+    phys_injection: float,
+    phys_leak: float,
+    phys_cap_mode: str,
+) -> tuple[list[dict], list[dict]]:
+    """Cache heavy energy frames separately to avoid re-simulating on UI tweaks."""
+    G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
+    src_list = list(sources) if sources else None
+    node_frames, edge_frames = simulate_energy_flow(
+        G,
+        steps=int(steps),
+        flow_mode=str(flow_mode),
+        damping=float(damping),
+        sources=src_list,
+        phys_injection=float(phys_injection),
+        phys_leak=float(phys_leak),
+        phys_cap_mode=str(phys_cap_mode),
+    )
+    return node_frames, edge_frames
 
 
 def _quick_counts(df: pd.DataFrame, src_col: str, dst_col: str) -> tuple[int, int]:
@@ -1316,17 +1351,27 @@ with tab_energy:
     else:
         st.caption("Режим **phys**: pressure/flow по рёбрам (аналог электрической сети). Режимы **rw/evo**: диффузия.")
 
+        # Автоподстройка производительности под размер графа.
+        N = int(G_view.number_of_nodes())
+        E = int(G_view.number_of_edges())
+        if N > 1200 or E > 6000:
+            _steps_def, _stride_def, _edges_def = 25, 4, 1400
+        elif N > 700 or E > 3500:
+            _steps_def, _stride_def, _edges_def = 35, 3, 2200
+        else:
+            _steps_def, _stride_def, _edges_def = 40, 2, 2500
+
         c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
         with c1:
             flow_mode_ui = st.selectbox("Модель", ["phys", "rw", "evo"], index=0)
-            flow_steps = st.slider("Шаги", 1, 120, 40)
+            flow_steps = st.slider("Шаги", 1, 120, int(_steps_def))
         with c2:
             flow_damp = st.slider("Damping", 0.0, 1.0, 0.98, 0.01)
             edge_bins = st.slider("Bins (цвет рёбер)", 3, 10, 6)
         with c3:
             node_size_energy = st.slider("Размер узлов", 1, 20, 6)
-            max_edges_viz = st.slider("Рёбер в 3D", 300, 12000, 2500, 100)
-            frame_stride = st.slider("Stride кадров", 1, 10, 2)
+            max_edges_viz = st.slider("Рёбер в 3D", 300, 12000, int(_edges_def), 100)
+            frame_stride = st.slider("Stride кадров", 1, 10, int(_stride_def))
         with c4:
             edge_subset_mode = st.selectbox("Выбор рёбер", ["top_weight", "random"], index=0)
 
@@ -1382,10 +1427,29 @@ with tab_energy:
                     analysis_mode,
                     base_seed,
                 )
+                src_key = tuple(sources) if sources else tuple()
+                node_frames, edge_frames = _energy_frames_cached(
+                    active_entry["id"],
+                    df_hash,
+                    src_col,
+                    dst_col,
+                    float(min_conf),
+                    float(min_weight),
+                    analysis_mode,
+                    steps=int(flow_steps),
+                    flow_mode=str(flow_mode_ui),
+                    damping=float(flow_damp),
+                    sources=src_key,
+                    phys_injection=float(st.session_state.get("__phys_injection", 0.15)),
+                    phys_leak=float(st.session_state.get("__phys_leak", 0.02)),
+                    phys_cap_mode=str(st.session_state.get("__phys_cap", "strength")),
+                )
                 fig_flow = make_energy_flow_figure_3d(
                     G_view,
                     pos3d_local,
                     steps=int(flow_steps),
+                    node_frames=node_frames,
+                    edge_frames=edge_frames,
                     flow_mode=str(flow_mode_ui),
                     damping=float(flow_damp),
                     sources=sources,
