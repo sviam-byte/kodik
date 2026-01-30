@@ -656,11 +656,15 @@ def simulate_energy_flow(
     phys_injection: float = 0.15,
     phys_leak: float = 0.02,
     phys_cap_mode: str = "strength",
+    rw_impulse: bool = True,
 ) -> Tuple[List[Dict], List[Dict[Tuple, float]]]:
     """Per-step node energies + per-step edge fluxes (for Plotly frames).
 
     Output lengths: steps+1 for t = 0..steps.
     Physical mode parameters are forwarded to the pressure/flow simulator.
+    For RW/Evo modes, phys_injection controls optional reinjection at sources:
+      - rw_impulse=True: inject only once at t=0 (wave that dissipates).
+      - rw_impulse=False: inject each step (continuous forcing).
     """
     fm = str(flow_mode).lower().strip()
     if fm in ("phys", "pressure", "flow"):
@@ -701,6 +705,17 @@ def simulate_energy_flow(
     for s in srcs:
         e[idx[s]] += 1.0 / float(len(srcs))
 
+    inj = float(phys_injection)
+    if not np.isfinite(inj):
+        inj = 0.0
+    inj = max(0.0, min(1.0, inj))
+
+    if bool(rw_impulse) and inj > 0.0:
+        add = inj / float(len(srcs))
+        for s in srcs:
+            e[idx[s]] += add
+        inj = 0.0
+
     damp = float(damping)
     if not np.isfinite(damp):
         damp = 1.0
@@ -728,6 +743,10 @@ def simulate_energy_flow(
         e = e @ P
         if damp != 1.0:
             e = e * damp
+        if inj > 0.0:
+            add = inj / float(len(srcs))
+            for s in srcs:
+                e[idx[s]] += add
         ne, ef = _snapshot(e)
         node_frames.append(ne)
         edge_frames.append(ef)
@@ -750,9 +769,13 @@ def make_energy_flow_figure_3d(
     phys_cap_mode: str = "strength",
     node_size: int = 6,
     edge_bins: int = 7,
+    hotspot_q: float = 0.92,
+    hotspot_size_mult: float = 4.0,
+    base_node_opacity: float = 0.25,
     vis_contrast: float = 2.0,
     vis_clip: float = 0.06,
     vis_log: bool = True,
+    rw_impulse: bool = True,
     show_labels: bool = False,
     height: int = 820,
     max_edges_viz: int = 3000,
@@ -765,6 +788,9 @@ def make_energy_flow_figure_3d(
       - vis_contrast: gamma-like contrast (>1 highlights subtle differences).
       - vis_clip: symmetric percentile clipping for robust normalization.
       - vis_log: log(1+x) compresses outliers before normalization.
+      - hotspot_q: quantile for hotspot highlighting (higher = fewer nodes).
+      - hotspot_size_mult: hotspot marker size multiplier.
+      - base_node_opacity: opacity of the base node layer.
       - show_labels: toggles node labels for readability/perf trade-off.
 
     Performance controls:
@@ -824,6 +850,7 @@ def make_energy_flow_figure_3d(
             phys_injection=float(phys_injection),
             phys_leak=float(phys_leak),
             phys_cap_mode=str(phys_cap_mode),
+            rw_impulse=bool(rw_impulse),
         )
 
     nodes = [n for n in G.nodes() if n in pos3d]
@@ -831,8 +858,28 @@ def make_energy_flow_figure_3d(
     ys = [pos3d[n][1] for n in nodes]
     zs = [pos3d[n][2] for n in nodes]
 
+    base_node_opacity = float(base_node_opacity)
+    base_node_opacity = max(0.0, min(1.0, base_node_opacity))
+    hotspot_q = float(hotspot_q)
+    hotspot_q = max(0.0, min(0.999, hotspot_q))
+    hotspot_size_mult = max(1.0, float(hotspot_size_mult))
+
+    def _energy_vec(frame_map: Dict) -> np.ndarray:
+        """Return log-scaled per-node energy for hotspot detection."""
+        vals = [float(frame_map.get(n, 0.0)) for n in nodes]
+        arr = _as_float_array(vals)
+        return np.log1p(np.maximum(arr, 0.0))
+
+    def _hot_mask(ev: np.ndarray) -> np.ndarray:
+        """Mask nodes above the requested energy quantile."""
+        if ev.size == 0:
+            return np.zeros(0, dtype=bool)
+        thr = np.quantile(ev, hotspot_q)
+        return ev >= thr
+
     e0 = node_frames[0] if node_frames else {}
     c0 = _prep_energy_for_colors(e0) if node_frames else [0.0 for _ in nodes]
+    ev0 = _energy_vec(e0) if node_frames else np.zeros(len(nodes), dtype=float)
 
     node_trace = go.Scatter3d(
         x=xs,
@@ -845,6 +892,7 @@ def make_energy_flow_figure_3d(
             colorscale="Viridis",
             showscale=True,
             colorbar=dict(title="energy"),
+            opacity=base_node_opacity,
         ),
         text=[str(n) for n in nodes],
         hoverinfo="text",
@@ -852,6 +900,27 @@ def make_energy_flow_figure_3d(
     )
     if show_labels:
         node_trace.update(mode="markers+text", textposition="top center")
+
+    hm0 = _hot_mask(ev0)
+    xs_h = [xs[i] for i in range(len(nodes)) if hm0[i]]
+    ys_h = [ys[i] for i in range(len(nodes)) if hm0[i]]
+    zs_h = [zs[i] for i in range(len(nodes)) if hm0[i]]
+    cs_h = [float(ev0[i]) for i in range(len(nodes)) if hm0[i]]
+    hot_trace = go.Scatter3d(
+        x=xs_h,
+        y=ys_h,
+        z=zs_h,
+        mode="markers",
+        marker=dict(
+            size=float(node_size) * hotspot_size_mult,
+            color=cs_h,
+            colorscale="Turbo",
+            showscale=False,
+            opacity=0.95,
+        ),
+        hoverinfo="skip",
+        name="hotspots",
+    )
 
     # --------------------------
     # Edge subset for rendering
@@ -918,6 +987,7 @@ def make_energy_flow_figure_3d(
     for t in frame_ids:
         et = node_frames[t]
         ct = _prep_energy_for_colors(et)
+        evt = _energy_vec(et)
 
         overlays = _build_edge_overlay_traces(
             pos3d,
@@ -940,6 +1010,7 @@ def make_energy_flow_figure_3d(
                 color=ct,
                 colorscale="Viridis",
                 showscale=False,
+                opacity=base_node_opacity,
             ),
             text=[str(n) for n in nodes],
             hoverinfo="skip",
@@ -948,11 +1019,34 @@ def make_energy_flow_figure_3d(
         if show_labels:
             node_frame_kwargs["textposition"] = "top center"
         fr_data.append(go.Scatter3d(**node_frame_kwargs))
+
+        hmt = _hot_mask(evt)
+        xs_h = [xs[i] for i in range(len(nodes)) if hmt[i]]
+        ys_h = [ys[i] for i in range(len(nodes)) if hmt[i]]
+        zs_h = [zs[i] for i in range(len(nodes)) if hmt[i]]
+        cs_h = [float(evt[i]) for i in range(len(nodes)) if hmt[i]]
+        fr_data.append(
+            go.Scatter3d(
+                x=xs_h,
+                y=ys_h,
+                z=zs_h,
+                mode="markers",
+                marker=dict(
+                    size=float(node_size) * hotspot_size_mult,
+                    color=cs_h,
+                    colorscale="Turbo",
+                    showscale=False,
+                    opacity=0.95,
+                ),
+                hoverinfo="skip",
+                name="hotspots",
+            )
+        )
         fr_data.append(base_edges)
         fr_data.extend(overlays)
         frames.append(go.Frame(data=fr_data, name=str(t)))
 
-    fig = go.Figure(data=[node_trace, base_edges, *overlay0], frames=frames)
+    fig = go.Figure(data=[node_trace, hot_trace, base_edges, *overlay0], frames=frames)
     fig.update_layout(
         template="plotly_dark",
         height=int(height),
@@ -1089,14 +1183,14 @@ def _build_edge_overlay_traces(
                 ys.extend([y0, y1, None])
                 zs.extend([z0, z1, None])
         if xs:
-            width = float(1.0 + bi * 1.1) if normed is not None else 2.0
             traces.append(
                 go.Scatter3d(
                     x=xs,
                     y=ys,
                     z=zs,
                     mode="lines",
-                    line=dict(color=colors[bi], width=width),
+                    line=dict(color=colors[bi], width=0.8),
+                    opacity=0.25,
                     hoverinfo="none",
                     showlegend=False,
                 )
