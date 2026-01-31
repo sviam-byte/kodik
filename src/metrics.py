@@ -1041,13 +1041,23 @@ def _build_edge_overlay_traces(
             contrast = 1.0
         return np.power(arr, 1.0 / contrast)
 
+    def _edge_colors(count: int) -> List[str]:
+        """Return a perceptually distinct colorscale for edge overlays."""
+        safe_count = int(max(2, count))
+        try:
+            # Lazy import to avoid import-time failures in constrained deployments.
+            from plotly.colors import sample_colorscale
+        except Exception:
+            return [
+                f"rgba(255, 50, 50, {0.3 + 0.7 * i / (safe_count - 1)})"
+                for i in range(safe_count)
+            ]
+        return sample_colorscale("Inferno", [i / (safe_count - 1) for i in range(safe_count)])
+
     if vis_contrast is None and vis_clip is None and vis_log is None:
         bins = np.linspace(vmin, vmax, int(max(2, nbins)) + 1)
-        # Используем огненную шкалу: от прозрачного красного к ярко-желтому
-        colors = [
-            f"rgba(255, 50, 50, {0.3 + 0.7 * i/(len(bins)-2)})"
-            for i in range(len(bins) - 1)
-        ]
+        # Яркая шкала, чтобы различия по весам/конфиденсу читались в 3D.
+        colors = _edge_colors(len(bins) - 1)
         normed = None
     else:
         arr = _as_float_array(vals)
@@ -1057,11 +1067,8 @@ def _build_edge_overlay_traces(
         arr = _boost01(arr, float(vis_contrast or 1.0))
         normed = arr
         bins = np.linspace(0.0, 1.0, int(max(2, nbins)) + 1)
-        # Используем огненную шкалу: от прозрачного красного к ярко-желтому
-        colors = [
-            f"rgba(255, 50, 50, {0.3 + 0.7 * i/(len(bins)-2)})"
-            for i in range(len(bins) - 1)
-        ]
+        # Яркая шкала, чтобы различия по весам/конфиденсу читались в 3D.
+        colors = _edge_colors(len(bins) - 1)
 
     traces: List[go.Scatter3d] = []
     for bi in range(len(bins) - 1):
@@ -1084,8 +1091,8 @@ def _build_edge_overlay_traces(
                     y=ys,
                     z=zs,
                     mode="lines",
-                    line=dict(color=colors[bi], width=0.8),
-                    opacity=0.25,
+                    line=dict(color=colors[bi], width=2.2),
+                    opacity=0.95,
                     hoverinfo="none",
                     showlegend=False,
                 )
