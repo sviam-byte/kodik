@@ -7,7 +7,6 @@ import numpy as np
 import networkx as nx
 import scipy.sparse.linalg as spla
 import plotly.graph_objects as go
-import plotly.colors as pc
 
 from networkx.algorithms.community import modularity, louvain_communities
 
@@ -564,82 +563,80 @@ def _simulate_energy_physical(
     injection: float = 0.15,
     leak: float = 0.02,
 ) -> Tuple[List[Dict], List[Dict[Tuple, float]]]:
-    """
-    Physical-ish flow:
-      pressure_i = E_i / (cap_i + eps)
-      flow_{u->v} = w_uv * (pressure_u - pressure_v)
-      E update by net flow + injection at sources - leak everywhere
-    We store edge_flux as |flow| for visualization.
-    """
+    """Pressure/flow simulator with a stable dt for smoother dynamics."""
     H = _as_undirected_simple(G)
     nodes = list(H.nodes())
     if not nodes:
         return [], []
 
-    # Capacity model.
+    # Capacity (degree or weighted strength).
     if cap_mode == "degree":
         cap = {n: float(H.degree(n)) for n in nodes}
     else:
-        # Default: weighted strength.
         cap = {n: float(H.degree(n, weight="weight")) for n in nodes}
-    eps = 1e-9
 
-    # Sources: user-provided subset, else top-strength node.
-    srcs: List = []
+    # Avoid division by zero in pressure.
+    for n in cap:
+        if cap[n] <= 0:
+            cap[n] = 1.0
+
+    # Sources: user-provided subset, else top-capacity node.
+    srcs = []
     if sources:
         srcs = [s for s in sources if s in H]
     if not srcs:
         srcs = [max(cap, key=cap.get)] if cap else [nodes[0]]
 
-    # Initialize energy.
+    # Initialize energy with a noticeable impulse at sources.
     E = {n: 0.0 for n in nodes}
     for s in srcs:
-        E[s] += 1.0 / float(len(srcs))
+        E[s] = 10.0
 
-    damp = float(damping)
-    if not np.isfinite(damp):
-        damp = 1.0
-    damp = max(0.0, min(1.0, damp))
+    # === Physical hack: dt ===
+    # dt controls flow smoothness; too large makes the system unstable.
+    dt = 0.15
 
-    steps = int(max(0, steps))
-
-    node_frames: List[Dict] = []
-    edge_frames: List[Dict[Tuple, float]] = []
+    node_frames = []
+    edge_frames = []
 
     for t in range(steps + 1):
-        # Snapshot at current energies.
-        node_frames.append({n: float(E.get(n, 0.0)) for n in nodes})
+        # Snapshot current energies.
+        node_frames.append(E.copy())
 
-        # Compute pressures.
-        P = {n: float(E[n]) / (cap.get(n, 0.0) + eps) for n in nodes}
+        # Pressure = Energy / Capacity.
+        P = {n: E[n] / cap[n] for n in nodes}
 
-        # Compute flows and accumulate dE.
         dE = {n: 0.0 for n in nodes}
-        edge_flux: Dict[Tuple, float] = {}
+        edge_flux = {}
+
         for u, v, d in H.edges(data=True):
             w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except Exception:
-                w = 1.0
-            # Signed flow from u->v.
-            f = w * (P[u] - P[v])
-            dE[u] -= f
-            dE[v] += f
-            edge_flux[(u, v)] = float(abs(f))
+            # Flow = pressure difference * conductance (weight).
+            # dt keeps updates smooth so nodes don't go negative in one step.
+            flux = w * (P[u] - P[v]) * dt
+
+            dE[u] -= flux
+            dE[v] += flux
+            edge_flux[(u, v)] = abs(flux)
 
         edge_frames.append(edge_flux)
 
         if t == steps:
             break
 
-        # Update energies: net flow + injection/leak.
+        # Apply updates.
         for n in nodes:
-            E[n] = E[n] + dE[n]
+            E[n] += dE[n]
+
+            # Injection (constant input at sources).
             if n in srcs:
-                E[n] += float(injection) / float(len(srcs))
-            E[n] = E[n] * damp
-            E[n] = max(0.0, E[n] - float(leak))
+                E[n] += float(injection) * dt * 10.0
+
+            # Leak & damping.
+            E[n] *= damping
+            E[n] -= float(leak) * dt
+            if E[n] < 0:
+                E[n] = 0.0
 
     return node_frames, edge_frames
 
@@ -808,7 +805,7 @@ def make_energy_flow_figure_3d(
         return arr
 
     def _robust_unit(arr: np.ndarray, clip: float) -> np.ndarray:
-        """Normalize to [0,1] by fixing zero and clipping only the upper tail."""
+        """Normalize to [0,1] with only upper-tail clipping (0 stays 0)."""
         if arr.size == 0:
             return arr
         clip = float(clip)
@@ -828,13 +825,16 @@ def make_energy_flow_figure_3d(
         return np.power(arr, 1.0 / contrast)
 
     def _prep_energy_for_colors(energy_map: Dict) -> List[float]:
-        """Convert energy dict into visually boosted [0,1] colors."""
+        """Convert energy dict into boosted [0,1] values with a subtle glow floor."""
         vals = [float(energy_map.get(n, 0.0)) for n in nodes]
         arr = _as_float_array(vals)
         if vis_log:
             arr = np.log1p(np.maximum(arr, 0.0))
         arr = _robust_unit(arr, vis_clip)
         arr = _boost01(arr, vis_contrast)
+        # Give non-zero values a minimum glow so weak signals remain visible.
+        glow_floor = 0.04
+        arr = np.where(arr > 0.0, np.maximum(arr, glow_floor), 0.0)
         return [float(v) for v in arr]
 
     # Reuse precomputed frames when provided to avoid resimulating on UI-only changes.
@@ -887,7 +887,7 @@ def make_energy_flow_figure_3d(
         marker=dict(
             size=int(node_size),
             color=c0,
-            colorscale="Viridis",
+            colorscale="Plasma",
             showscale=True,
             colorbar=dict(title="energy"),
             opacity=base_node_opacity,
@@ -1006,7 +1006,7 @@ def make_energy_flow_figure_3d(
             marker=dict(
                 size=int(node_size),
                 color=ct,
-                colorscale="Viridis",
+                colorscale="Plasma",
                 showscale=False,
                 opacity=base_node_opacity,
             ),
@@ -1129,15 +1129,12 @@ def _build_edge_overlay_traces(
         return arr
 
     def _robust_unit(arr: np.ndarray, clip: float) -> np.ndarray:
-        """Normalize to [0,1] with percentile clipping for stable contrast."""
+        """Normalize to [0,1] while keeping 0 as the true minimum."""
         clip = max(0.0, min(0.49, float(clip)))
-        lo = np.quantile(arr, clip)
         hi = np.quantile(arr, 1.0 - clip)
-        if not np.isfinite(lo):
-            lo = 0.0
-        if not np.isfinite(hi) or hi <= lo:
-            hi = lo + 1e-12
-        return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+        if not np.isfinite(hi) or hi <= 0.0:
+            hi = np.max(arr) + 1e-12
+        return np.clip(arr / hi, 0.0, 1.0)
 
     def _boost01(arr: np.ndarray, contrast: float) -> np.ndarray:
         """Gamma-like contrast on [0,1] values."""
@@ -1148,10 +1145,11 @@ def _build_edge_overlay_traces(
 
     if vis_contrast is None and vis_clip is None and vis_log is None:
         bins = np.linspace(vmin, vmax, int(max(2, nbins)) + 1)
-        colors = pc.sample_colorscale(
-            "Viridis",
-            [i / max(1, (len(bins) - 2)) for i in range(len(bins) - 1)],
-        )
+        # Используем огненную шкалу: от прозрачного красного к ярко-желтому
+        colors = [
+            f"rgba(255, 50, 50, {0.3 + 0.7 * i/(len(bins)-2)})"
+            for i in range(len(bins) - 1)
+        ]
         normed = None
     else:
         arr = _as_float_array(vals)
@@ -1161,10 +1159,11 @@ def _build_edge_overlay_traces(
         arr = _boost01(arr, float(vis_contrast or 1.0))
         normed = arr
         bins = np.linspace(0.0, 1.0, int(max(2, nbins)) + 1)
-        colors = pc.sample_colorscale(
-            "Viridis",
-            [i / max(1, (len(bins) - 2)) for i in range(len(bins) - 1)],
-        )
+        # Используем огненную шкалу: от прозрачного красного к ярко-желтому
+        colors = [
+            f"rgba(255, 50, 50, {0.3 + 0.7 * i/(len(bins)-2)})"
+            for i in range(len(bins) - 1)
+        ]
 
     traces: List[go.Scatter3d] = []
     for bi in range(len(bins) - 1):
