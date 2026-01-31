@@ -14,40 +14,12 @@ from .entropy import (
     entropy_confidence,
     entropy_triangle_support,
 )
+from src.utils import as_simple_undirected, safe_float
 
 
-def _as_simple_undirected(G: nx.Graph) -> nx.Graph:
-    """Convert to simple undirected graph (merge multiedges, sum weights)."""
-    H = G
-    if hasattr(H, "is_directed") and H.is_directed():
-        H = H.to_undirected(as_view=False)
-
-    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
-        simple = nx.Graph()
-        simple.add_nodes_from(H.nodes(data=True))
-        for u, v, d in H.edges(data=True):
-            w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except Exception:
-                w = 1.0
-            if simple.has_edge(u, v):
-                simple[u][v]["weight"] = float(simple[u][v].get("weight", 0.0)) + w
-            else:
-                simple.add_edge(u, v, **{**d, "weight": w})
-        return simple
-
-    return nx.Graph(H)
-
-
-def _safe_float(x, default: float = 1.0) -> float:
-    """Convert to float with a safe default."""
-    try:
-        if x is None:
-            return float(default)
-        return float(x)
-    except Exception:
-        return float(default)
+def _safe_attr_float(x, default: float = 1.0) -> float:
+    """Convert to float with a safe default for edge attributes."""
+    return safe_float(x, default)
 
 
 def _sample_edge_attrs_from_empirical(
@@ -60,9 +32,9 @@ def _sample_edge_attrs_from_empirical(
     d = attrs_pool[int(rng.integers(0, len(attrs_pool)))]
     out = {}
     if "weight" in d:
-        out["weight"] = _safe_float(d.get("weight", 1.0), 1.0)
+        out["weight"] = _safe_attr_float(d.get("weight", 1.0), 1.0)
     if "confidence" in d:
-        out["confidence"] = _safe_float(d.get("confidence", 1.0), 1.0)
+        out["confidence"] = _safe_attr_float(d.get("confidence", 1.0), 1.0)
     return out
 
 
@@ -136,7 +108,7 @@ def run_mix_attack(
       - "hrish_mix": both channels using alpha/beta
     """
     rng = np.random.default_rng(int(seed))
-    H0 = _as_simple_undirected(G)
+    H0 = as_simple_undirected(G)
     H = H0.copy()
 
     N = H.number_of_nodes()
@@ -150,8 +122,8 @@ def run_mix_attack(
     attrs_pool = []
     for _, _, d in H0.edges(data=True):
         attrs_pool.append({
-            "weight": _safe_float(d.get("weight", 1.0), 1.0),
-            "confidence": _safe_float(d.get("confidence", 1.0), 1.0),
+            "weight": _safe_attr_float(d.get("weight", 1.0), 1.0),
+            "confidence": _safe_attr_float(d.get("confidence", 1.0), 1.0),
         })
 
     if replace_from.upper() == "CFG":
@@ -159,7 +131,7 @@ def run_mix_attack(
     else:
         Gsrc = make_er_gnm(N, M, seed=int(seed) + 999)
 
-    source_edges = list(_as_simple_undirected(Gsrc).edges())
+    source_edges = list(as_simple_undirected(Gsrc).edges())
 
     rows = []
     total_swaps_done = 0

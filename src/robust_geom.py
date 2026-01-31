@@ -11,6 +11,7 @@ import numpy as np
 import networkx as nx
 from joblib import Parallel, delayed
 
+from src.utils import as_simple_undirected, safe_float
 
 # -----------------------------
 # Helpers
@@ -28,28 +29,12 @@ def add_dist_attr(G: nx.Graph) -> nx.Graph:
     return H
 
 
-def _as_undirected_simple(G: nx.Graph) -> nx.Graph:
-    H = G
-    if hasattr(H, "is_directed") and H.is_directed():
-        H = H.to_undirected(as_view=False)
-
-    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
-        S = nx.Graph()
-        S.add_nodes_from(H.nodes(data=True))
-        for u, v, d in H.edges(data=True):
-            w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except Exception:
-                w = 1.0
-            w = max(0.0, w)
-            if S.has_edge(u, v):
-                S[u][v]["weight"] = float(S[u][v].get("weight", 0.0)) + w
-            else:
-                S.add_edge(u, v, weight=w)
-        return S
-
-    return nx.Graph(H)
+def _normalize_edge_weights(G: nx.Graph) -> nx.Graph:
+    """Clamp edge weights to positive finite values for entropy/curvature math."""
+    for _, _, d in G.edges(data=True):
+        w = safe_float(d.get("weight", 1.0), 1.0)
+        d["weight"] = max(0.0, w)
+    return G
 
 
 # -----------------------------
@@ -61,7 +46,7 @@ def network_entropy_rate(G: nx.Graph, base: float = math.e, **_ignored) -> float
         H_rw = - Σ_i π_i Σ_j P_ij log P_ij
     where P_ij = w_ij / strength(i), π_i = strength(i)/Σ strength.
     """
-    H = _as_undirected_simple(G)
+    H = _normalize_edge_weights(as_simple_undirected(G))
     if H.number_of_nodes() < 2 or H.number_of_edges() == 0:
         return 0.0
     # Vectorized computation via sparse adjacency to avoid Python loops.
@@ -191,7 +176,7 @@ def ollivier_ricci_edge(
     κ(x,y) = 1 - W1(µ_x, µ_y)/d(x,y)
     Distances use dist=1/weight.
     """
-    H = _as_undirected_simple(G)
+    H = _normalize_edge_weights(as_simple_undirected(G))
     if not H.has_edge(x, y):
         return None
 
@@ -239,7 +224,7 @@ def ollivier_ricci_summary(
     scale: int = 120_000,
     **_ignored,
 ) -> CurvatureSummary:
-    H = _as_undirected_simple(G)
+    H = _normalize_edge_weights(as_simple_undirected(G))
     if H.number_of_edges() == 0:
         return CurvatureSummary(0.0, 0.0, 0.0, 0, 0)
 
@@ -307,7 +292,7 @@ def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e, **_ignored
       P_ij = a_ij * u_j / (lam * u_i),  π_i ∝ u_i v_i
       H_evo = -Σ_i π_i Σ_j P_ij log P_ij
     """
-    H = _as_undirected_simple(G)
+    H = _normalize_edge_weights(as_simple_undirected(G))
     if H.number_of_nodes() < 2 or H.number_of_edges() == 0:
         return float("nan")
 
