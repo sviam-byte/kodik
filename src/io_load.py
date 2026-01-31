@@ -32,6 +32,8 @@ def _read_csv_fast_with_encoding_fallback(file_bytes: bytes) -> pd.DataFrame:
     encodings_to_try = [
         "utf-8",
         "utf-8-sig",
+        # Common Cyrillic encoding used in Russian CSV exports.
+        "cp1251",
         "cp1252",
         "latin-1",
     ]
@@ -74,12 +76,6 @@ def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
             if df.shape[1] <= 1:
                 df = _read_csv_fast_with_encoding_fallback(file_bytes)
         except UnicodeDecodeError:
-            df = _read_csv_fast_with_encoding_fallback(file_bytes)
-        except Exception:
-            # ParserError / quoting issues / etc.
-            df = _read_csv_fast_with_encoding_fallback(file_bytes)
-        except Exception:
-            # ParserError / quoting issues / etc.
             df = _read_csv_fast_with_encoding_fallback(file_bytes)
         except Exception:
             # ParserError / quoting issues / etc.
