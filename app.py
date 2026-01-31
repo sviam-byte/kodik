@@ -42,12 +42,14 @@ from src.attacks import run_attack
 from src.attacks_mix import run_mix_attack
 from src.plotting import fig_metrics_over_steps, fig_compare_attacks
 from src.phase import classify_phase_transition
+from src.ui_blocks import help_icon, render_dashboard_metrics, render_dashboard_charts
 from src.session_io import (
     export_workspace_json,
     import_workspace_json,
     export_experiments_json,
     import_experiments_json,
 )
+from src.utils import as_simple_undirected
 
 # -----------------------------
 # Streamlit caching helpers
@@ -170,16 +172,44 @@ def _quick_counts(df: pd.DataFrame, src_col: str, dst_col: str) -> tuple[int, in
 st.markdown(
     """
     <style>
+    /* --- STICKY HEADER FIXES --- */
     div[data-testid="stVerticalBlock"] > div:has(> div.sticky-header) {
         position: sticky;
-        top: 0;
+        top: 2.8rem; /* Offset for Streamlit's own top bar */
         z-index: 9999;
-        background: #0e1117;
+        background-color: #0e1117;
         border-bottom: 1px solid rgba(250, 250, 250, 0.1);
         padding-top: 1rem;
-        padding-bottom: 0.5rem;
+        padding-bottom: 1rem;
     }
-    .sticky-header { margin-bottom: 0.5rem; }
+    /* Ensure tabs don't overlap with sticky header */
+    .stTabs {
+        margin-top: 1rem;
+        z-index: 1;
+    }
+
+    /* --- BUTTON STYLING --- */
+    div.stButton > button {
+        border-radius: 8px;
+        font-weight: 500;
+        transition: all 0.2s ease-in-out;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    div.stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        border-color: rgba(255, 255, 255, 0.3);
+    }
+    div.stButton > button:active {
+        transform: translateY(0px);
+    }
+    /* Primary button specific styling */
+    div.stButton > button[kind="primary"] {
+        background: linear-gradient(90deg, #ff4b4b 0%, #ff2b2b 100%);
+        border: none;
+    }
+
+    /* --- METRICS & TEXT --- */
     div[data-testid="stMetricValue"] { font-size: 1.35rem !important; }
     .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
         font-size: 1.05rem;
@@ -189,38 +219,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-HELP_TEXT = {
-    "N": "Количество узлов (Nodes).",
-    "E": "Количество рёбер (Edges).",
-    "Density": "Плотность графа.",
-    "LCC frac": "Доля узлов в гигантской компоненте.",
-    "Efficiency": "Глобальная эффективность (аппрокс).",
-    "Modularity Q": "Модульность сообществ.",
-    "Lambda2": "Алгебраическая связность (λ₂).",
-    "Assortativity": "Ассортативность по степеням.",
-    "Clustering": "Коэффициент кластеризации.",
-    "H_deg": "Энтропия распределения степеней. Насколько разнообразны «роли» узлов.",
-    "H_w": "Энтропия распределения весов рёбер. Насколько тонко настроены связи.",
-    "H_conf": "Энтропия распределения confidence. Насколько неоднородна/надёжна структура.",
-    "tau_relax": "Время релаксации τ ~ 1/λ₂ (на LCC). Больше τ = медленнее затухают возмущения.",
-    "beta_red": "Редандантность β: доля «лишних» рёбер сверх остова. 0=дерево, выше=больше альтернативных путей.",
-    "epi_thr": "Порог распространения (эпидемический) ~ 1/λ_max. Меньше порог = легче распространяется возбуждение.",
-    "Mix/Rewire": "Перемешивание рёбер с вероятностью p.",
-    "Weak edges": "Удаляем рёбра от слабых к сильным (по weight/confidence).",
-    "Low degree": "Удаляем узлы с минимальной степенью (слабые узлы).",
-    "Weak strength": "Удаляем узлы с минимальной суммой весов рёбер (слабые узлы по весу).",
-    "H_rw": "Энтропийная скорость случайного блуждания (random-walk entropy rate). Больше = больше альтернативных микромаршрутов.",
-    "H_evo": "Эволюционная энтропия Demetrius (PF-Markov): энтропийная скорость, где переходы согласованы с PF-структурой A.",
-    "kappa_mean": "Средняя Ollivier–Ricci кривизна по выборке рёбер (с учётом dist=1/weight). Больше = локально больше альтернативных путей.",
-    "kappa_frac_negative": "Доля рёбер с отрицательной κ (мосты/бутылочные горлышки).",
-    "fragility_H": "Хрупкость по H_rw: 1/max(H_rw, eps).",
-    "fragility_evo": "Хрупкость по H_evo: 1/max(H_evo, eps).",
-    "fragility_kappa": "Хрупкость по κ̄: 1/max(1+κ̄, eps).",
-
-}
-def help_icon(key: str) -> str:
-    return HELP_TEXT.get(key, "")
-
 METRIC_HELP = {
     "lcc_frac": "Доля узлов в гигантской компоненте связности. Параметр порядка для перколяции.",
     "eff_w": "Глобальная эффективность (среднее 1/кратчайшему пути; аппрокс по k источникам).",
@@ -296,33 +294,6 @@ def _forward_fill_heavy(df_hist: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].replace([np.inf, -np.inf], np.nan).ffill()
     return df
 
-def _as_simple_undirected(G: nx.Graph) -> nx.Graph:
-    """
-    Делает простой неориентированный Graph (core_number/centrality иначе могут падать).
-    - DiGraph -> Graph
-    - MultiGraph -> Graph (схлопываем мульти-рёбра, суммируем weight)
-    """
-    H = G
-    if hasattr(H, "is_directed") and H.is_directed():
-        H = H.to_undirected(as_view=False)
-
-    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
-        S = nx.Graph()
-        S.add_nodes_from(H.nodes(data=True))
-        for u, v, d in H.edges(data=True):
-            w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except Exception:
-                w = 1.0
-            if S.has_edge(u, v):
-                S[u][v]["weight"] = float(S[u][v].get("weight", 0.0)) + w
-            else:
-                S.add_edge(u, v, weight=w)
-        return S
-
-    return nx.Graph(H)
-
 def _strength(G: nx.Graph, n):
     s = 0.0
     for _, _, d in G.edges(n, data=True):
@@ -353,7 +324,7 @@ def _fallback_removal_order(G: nx.Graph, kind: str, seed: int):
         return []
 
     rng = np.random.default_rng(int(seed))
-    H = _as_simple_undirected(G)
+    H = as_simple_undirected(G)
     nodes = list(H.nodes())
 
     if kind in ("random",):
@@ -437,7 +408,7 @@ def run_edge_attack(
         df = pd.DataFrame([{"step": 0, "removed_frac": 0.0, "N": G.number_of_nodes(), "E": 0, "lcc_frac": 0.0}])
         return df, {"removed_edges_order": []}
 
-    H0 = _as_simple_undirected(G)
+    H0 = as_simple_undirected(G)
     edges = list(H0.edges(data=True))
     kind = str(kind)
 
@@ -727,7 +698,7 @@ def emulate_node_attack_from_order(
     Static-order node removal (for weak attacks when src.run_attack doesn't support them).
     Returns df_hist like run_attack.
     """
-    H0 = _as_simple_undirected(G)
+    H0 = as_simple_undirected(G)
     N0 = H0.number_of_nodes()
     if N0 == 0:
         return pd.DataFrame([{"step": 0, "removed_frac": 0.0, "N": 0, "E": 0, "lcc_frac": 0.0}])
@@ -1236,130 +1207,11 @@ with tab_main:
         if G_view.number_of_nodes() > 1500:
             st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
 
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("N (Nodes)", met.get("N", G_view.number_of_nodes()), help=help_icon("N"))
-        k2.metric("E (Edges)", met.get("E", G_view.number_of_edges()), help=help_icon("E"))
-        k3.metric("Density", f"{float(met.get('density', 0.0)):.6f}", help=help_icon("Density"))
-        k4.metric("Avg Degree", f"{float(met.get('avg_degree', 0.0)):.2f}")
+        render_dashboard_metrics(G_view, met)
 
         st.markdown("---")
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Components", met.get("C", "N/A"))
-        c2.metric("LCC Size", met.get("lcc_size", "N/A"), f"{float(met.get('lcc_frac', 0.0))*100:.1f}%", help=help_icon("LCC frac"))
-        c3.metric("Diameter (approx)", met.get("diameter_approx", "N/A"))
-        c4.metric("Efficiency", f"{float(met.get('eff_w', 0.0)):.4f}", help=help_icon("Efficiency"))
-
-        st.markdown("---")
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Modularity Q", f"{float(met.get('mod', 0.0)):.4f}", help=help_icon("Modularity Q"))
-        m2.metric("Lambda2 (LCC)", f"{float(met.get('l2_lcc', 0.0)):.6f}", help=help_icon("Lambda2"))
-        m3.metric("Assortativity", f"{float(met.get('assortativity', 0.0)):.4f}", help=help_icon("Assortativity"))
-        m4.metric("Clustering", f"{float(met.get('clustering', 0.0)):.4f}", help=help_icon("Clustering"))
-
-        st.markdown("---")
-        e1, e2, e3 = st.columns(3)
-        e1.metric("H_deg", f"{float(met.get('H_deg', float('nan'))):.4f}", help=help_icon("H_deg"))
-        e2.metric("H_w", f"{float(met.get('H_w', float('nan'))):.4f}", help=help_icon("H_w"))
-        e3.metric("H_conf", f"{float(met.get('H_conf', float('nan'))):.4f}", help=help_icon("H_conf"))
-
-        with st.expander("❔", expanded=False):
-            st.markdown(
-                "- **H_deg**: насколько разнообразны роли узлов (иерархия vs распределённость)\n"
-                "- **H_w**: насколько «тонко» настроены силы связей (разнообразие весов)\n"
-                "- **H_conf**: неоднородность/надёжность структуры (по confidence)\n"
-            )
-
-        a1, a2, a3 = st.columns(3)
-        a1.metric(
-            "τ (Relaxation)",
-            f"{float(met.get('tau_relax', float('nan'))):.4g}",
-            help=help_icon("tau_relax"),
-        )
-        a2.metric("β (Redundancy)", f"{float(met.get('beta_red', float('nan'))):.4f}", help=help_icon("beta_red"))
-        a3.metric(
-            "1/λ_max (Epi thr)",
-            f"{float(met.get('epi_thr', float('nan'))):.4g}",
-            help=help_icon("epi_thr"),
-        )
-        st.markdown("---")
-        st.markdown("### 🧭 Геометрия / робастность (entropy + Ricci)")
-
-        g1, g2, g3, g4 = st.columns(4)
-        g1.metric(
-            "H_rw (entropy rate)",
-            f"{float(met.get('H_rw', float('nan'))):.4f}",
-            help=help_icon("H_rw"),
-        )
-        g2.metric(
-            "H_evo (Demetrius)",
-            f"{float(met.get('H_evo', float('nan'))):.4f}",
-            help=help_icon("H_evo"),
-        )
-        g3.metric(
-            "κ̄ (mean Ricci)",
-            f"{float(met.get('kappa_mean', float('nan'))):.4f}",
-            help=help_icon("kappa_mean"),
-        )
-        g4.metric(
-            "% κ<0",
-            f"{100.0*float(met.get('kappa_frac_negative', float('nan'))):.1f}%",
-            help=help_icon("kappa_frac_negative"),
-        )
-
-        h1, h2, h3, h4 = st.columns(4)
-        h1.metric(
-            "Frag(H_rw)",
-            f"{float(met.get('fragility_H', float('nan'))):.4g}",
-            help=help_icon("fragility_H"),
-        )
-        h2.metric(
-            "Frag(H_evo)",
-            f"{float(met.get('fragility_evo', float('nan'))):.4g}",
-            help=help_icon("fragility_evo"),
-        )
-        h3.metric(
-            "Frag(κ̄)",
-            f"{float(met.get('fragility_kappa', float('nan'))):.4g}",
-            help=help_icon("fragility_kappa"),
-        )
-        h4.metric(
-            "κ edges (ok/skip)",
-            f"{int(met.get('kappa_computed_edges', 0))}/{int(met.get('kappa_skipped_edges', 0))}",
-            help="Сколько рёбер реально посчитали κ (остальные пропущены из-за ограничения support).",
-        )
-
-
-        with st.expander("❔", expanded=False):
-            st.markdown(
-                "- **τ ~ 1/λ₂**: если τ больше, сеть медленнее «расслабляется» после возмущения\n"
-                "- **β**: сколько альтернативных путей есть (сколько «циклов» сверх остова)\n"
-                "- **1/λ_max**: насколько легко распространяется возбуждение по сети (порог)\n"
-            )
-
-        st.markdown("### 📈 Распределения")
-        d1, d2 = st.columns(2)
-
-        with d1:
-            degrees = [d for _, d in G_view.degree()]
-            if degrees:
-                fig_deg = px.histogram(x=degrees, nbins=30, title="Degree Distribution", labels={'x': 'Degree', 'y': 'Count'})
-                fig_deg.update_layout(template="plotly_dark")
-                _apply_plot_defaults(fig_deg, height=620)
-                st.plotly_chart(fig_deg, use_container_width=True, key="plot_deg_hist")
-            else:
-                st.info("Пустой граф")
-
-        with d2:
-            weights = [d.get('weight', 0) for _, _, d in G_view.edges(data=True)]
-            if weights:
-                fig_w = px.histogram(x=weights, nbins=30, title="Weight Distribution", labels={'x': 'Weight', 'y': 'Count'})
-                fig_w.update_layout(template="plotly_dark")
-                _apply_plot_defaults(fig_w, height=620)
-                st.plotly_chart(fig_w, use_container_width=True, key="plot_weight_hist")
-            else:
-                st.info("Нет весов")
+        render_dashboard_charts(G_view, _apply_plot_defaults)
 
 # ------------------------------
 # TAB: ENERGY & DYNAMICS
@@ -1617,7 +1469,7 @@ with tab_struct:
         st.markdown("---")
         st.subheader("Матрица смежности (heatmap)")
         if G_view.number_of_nodes() < 1000 and G_view.number_of_nodes() > 0:
-            adj = nx.adjacency_matrix(_as_simple_undirected(G_view), weight="weight").todense()
+            adj = nx.adjacency_matrix(as_simple_undirected(G_view), weight="weight").todense()
             fig_hm = px.imshow(adj, title="Adjacency Heatmap", color_continuous_scale="Viridis")
             fig_hm.update_layout(template="plotly_dark", height=760, width=760)
             st.plotly_chart(fig_hm, use_container_width=False, key="plot_adj_heatmap")
@@ -1658,7 +1510,7 @@ with tab_null:
                         G_new = rewire_mix(G_full, p=float(mix_p), seed=int(nm_seed))
                         src_tag = f"MIX(p={mix_p})"
 
-                    edges = [[u, v, 1.0, 1.0] for u, v in _as_simple_undirected(G_new).edges()]
+                    edges = [[u, v, 1.0, 1.0] for u, v in as_simple_undirected(G_new).edges()]
                     df_new = pd.DataFrame(edges, columns=["src", "dst", "weight", "confidence"])
 
                     add_graph(
@@ -2050,7 +1902,7 @@ with tab_attack:
                             k_remove = max(0, min(k_remove, len(removed_order)))
 
                             removed_set = set(removed_order[:k_remove])
-                            H = _as_simple_undirected(G_view).copy()
+                            H = as_simple_undirected(G_view).copy()
                             H.remove_nodes_from([n for n in removed_set if H.has_node(n)])
 
                             pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
@@ -2080,7 +1932,7 @@ with tab_attack:
 
                     else:
                         removed_edges_order = params.get("removed_edges_order") or []
-                        total_edges = params.get("total_edges") or len(_as_simple_undirected(G_view).edges())
+                        total_edges = params.get("total_edges") or len(as_simple_undirected(G_view).edges())
                         if not removed_edges_order:
                             st.warning("Нет removed_edges_order для 3D.")
                         else:
@@ -2095,7 +1947,7 @@ with tab_attack:
                             k_remove = int(round(frac_here * float(total_edges)))
                             k_remove = max(0, min(k_remove, len(removed_edges_order)))
 
-                            H = _as_simple_undirected(G_view).copy()
+                            H = as_simple_undirected(G_view).copy()
                             for (u, v) in removed_edges_order[:k_remove]:
                                 if H.has_edge(u, v):
                                     H.remove_edge(u, v)

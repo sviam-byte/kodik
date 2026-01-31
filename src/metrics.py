@@ -10,6 +10,8 @@ import plotly.graph_objects as go
 
 from networkx.algorithms.community import modularity, louvain_communities
 
+from src.utils import as_simple_undirected, safe_float
+
 from src.robust_geom import (
     network_entropy_rate,
     evolutionary_entropy_demetrius,
@@ -378,39 +380,14 @@ def compute_3d_layout(G: nx.Graph, seed: int) -> dict:
     return nx.spring_layout(G, dim=3, weight="weight", seed=int(seed))
 
 
-def _as_undirected_simple(G: nx.Graph) -> nx.Graph:
-    """Normalize to a simple undirected graph with numeric weights."""
-    H = G
-    if hasattr(H, "is_directed") and H.is_directed():
-        H = H.to_undirected(as_view=False)
-
-    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
-        S = nx.Graph()
-        S.add_nodes_from(H.nodes(data=True))
-        for u, v, d in H.edges(data=True):
-            w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except Exception:
-                w = 1.0
-            if S.has_edge(u, v):
-                S[u][v]["weight"] = float(S[u][v].get("weight", 0.0)) + w
-            else:
-                S.add_edge(u, v, weight=w)
-        H = S
-    else:
-        H = nx.Graph(H)
-
-    for _, _, d in H.edges(data=True):
-        w = d.get("weight", 1.0)
-        try:
-            w = float(w)
-        except Exception:
-            w = 1.0
+def _normalize_edge_weights(G: nx.Graph) -> nx.Graph:
+    """Ensure every edge has a positive finite weight to keep metrics stable."""
+    for _, _, d in G.edges(data=True):
+        w = safe_float(d.get("weight", 1.0), 1.0)
         if not np.isfinite(w) or w <= 0:
             w = 1.0
         d["weight"] = w
-    return H
+    return G
 
 
 def _rw_transition_matrix(G: nx.Graph, nodes: List) -> np.ndarray:
@@ -502,7 +479,7 @@ def compute_energy_flow(
         - Uses dense matrices; prefer modest graph sizes for interactive 3D usage.
         - If sources are not provided, we seed energy at the highest-strength node.
     """
-    H = _as_undirected_simple(G)
+    H = _normalize_edge_weights(as_simple_undirected(G))
     nodes = list(H.nodes())
     if not nodes:
         return {}, {}
@@ -564,7 +541,7 @@ def _simulate_energy_physical(
     leak: float = 0.02,
 ) -> Tuple[List[Dict], List[Dict[Tuple, float]]]:
     """Pressure/flow simulator with a stable dt for smoother dynamics."""
-    H = _as_undirected_simple(G)
+    H = _normalize_edge_weights(as_simple_undirected(G))
     nodes = list(H.nodes())
     if not nodes:
         return [], []
@@ -675,7 +652,7 @@ def simulate_energy_flow(
             leak=float(phys_leak),
         )
 
-    H = _as_undirected_simple(G)
+    H = _normalize_edge_weights(as_simple_undirected(G))
     nodes = list(H.nodes())
     if not nodes:
         return [], []

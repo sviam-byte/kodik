@@ -7,33 +7,7 @@ import pandas as pd
 import networkx as nx
 
 from .metrics import calculate_metrics, add_dist_attr
-
-def _as_simple_undirected(G: nx.Graph) -> nx.Graph:
-    """
-    Convert to a simple undirected graph so ranking metrics do not break.
-    - DiGraph -> undirected
-    - MultiGraph -> Graph (merge edges, sum weights)
-    """
-    H = G
-    if hasattr(H, "is_directed") and H.is_directed():
-        H = H.to_undirected(as_view=False)
-
-    if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
-        simple = nx.Graph()
-        simple.add_nodes_from(H.nodes(data=True))
-        for u, v, d in H.edges(data=True):
-            w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except Exception:
-                w = 1.0
-            if simple.has_edge(u, v):
-                simple[u][v]["weight"] = float(simple[u][v].get("weight", 0.0)) + w
-            else:
-                simple.add_edge(u, v, weight=w)
-        return simple
-
-    return nx.Graph(H)
+from src.utils import as_simple_undirected
 
 
 def _strength(G: nx.Graph, n) -> float:
@@ -202,7 +176,7 @@ def run_attack(
       aux: dict with 'removed_nodes' list (critical for UI) and optionally 'states'
     """
     attack_kind = str(attack_kind)
-    G_in = _as_simple_undirected(G_in)
+    G_in = as_simple_undirected(G_in)
     
     # -----------------------------------------------------
     # BRANCH 1: Adaptive attacks (weak nodes / low degree)
