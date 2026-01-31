@@ -10,11 +10,11 @@ import plotly.graph_objects as go
 
 from networkx.algorithms.community import modularity, louvain_communities
 
-from src.config import APPROX_EFFICIENCY_K, RICCI_CUTOFF, RICCI_MAX_SUPPORT
-from src.types import GraphMetrics
-from src.utils import as_simple_undirected, safe_float
+from .config import APPROX_EFFICIENCY_K, RICCI_CUTOFF, RICCI_MAX_SUPPORT
+from .types import GraphMetrics
+from .utils import as_simple_undirected, safe_float
 
-from src.robust_geom import (
+from .robust_geom import (
     network_entropy_rate,
     evolutionary_entropy_demetrius,
     ollivier_ricci_summary,
