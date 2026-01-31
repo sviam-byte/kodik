@@ -758,85 +758,38 @@ def make_energy_flow_figure_3d(
     steps: int = 25,
     node_frames: Optional[List[Dict]] = None,
     edge_frames: Optional[List[Dict[Tuple, float]]] = None,
+    # Старые аргументы оставлены для совместимости с существующими вызовами.
     flow_mode: str = "phys",
     damping: float = 1.0,
     sources: Optional[List] = None,
     phys_injection: float = 0.15,
     phys_leak: float = 0.02,
     phys_cap_mode: str = "strength",
-    node_size: int = 6,
     edge_bins: int = 7,
     hotspot_q: float = 0.92,
     hotspot_size_mult: float = 4.0,
     base_node_opacity: float = 0.25,
-    vis_contrast: float = 2.0,
-    vis_clip: float = 0.06,
-    vis_log: bool = True,
     rw_impulse: bool = True,
     show_labels: bool = False,
     height: int = 820,
-    max_edges_viz: int = 3000,
     frame_stride: int = 2,
-    edge_subset_mode: str = "top_weight",
+    # Новые параметры для интерактивной и яркой анимации.
+    anim_duration: int = 150,
+    node_size: int = 6,
+    vis_contrast: float = 2.0,
+    vis_clip: float = 0.05,
+    vis_log: bool = True,
+    max_edges_viz: int = 2000,
+    edge_subset_mode: str = "top_flux",
+    **kwargs,
 ) -> go.Figure:
-    """Animated 3D Plotly figure: node energy + edge flux overlay.
+    """Build an interactive 3D energy-flow animation optimized for mouse control.
 
-    Visual controls:
-      - vis_contrast: gamma-like contrast (>1 highlights subtle differences).
-      - vis_clip: upper-tail clipping for robust normalization.
-      - vis_log: log(1+x) compresses outliers before normalization.
-      - hotspot_q: quantile for hotspot highlighting (higher = fewer nodes).
-      - hotspot_size_mult: hotspot marker size multiplier.
-      - base_node_opacity: opacity of the base node layer.
-      - show_labels: toggles node labels for readability/perf trade-off.
-
-    Performance controls:
-      - max_edges_viz: limits rendered edges (base + overlays).
-      - frame_stride: uses every k-th frame to reduce Plotly frame count.
-      - edge_subset_mode: 'top_weight', 'top_flux', or 'random'.
+    Мы увеличиваем длительность кадров/перехода и оставляем redraw=True,
+    чтобы браузер успевал обрабатывать мышь во время анимации 3D.
     """
     if G.number_of_nodes() == 0:
         return go.Figure()
-
-    def _as_float_array(vals: List[float]) -> np.ndarray:
-        """Return a finite float array (non-finite values become zero)."""
-        arr = np.array([float(v) for v in vals], dtype=float)
-        arr[~np.isfinite(arr)] = 0.0
-        return arr
-
-    def _robust_unit(arr: np.ndarray, clip: float) -> np.ndarray:
-        """Normalize to [0,1] with only upper-tail clipping (0 stays 0)."""
-        if arr.size == 0:
-            return arr
-        clip = float(clip)
-        clip = max(0.0, min(1.0, clip))
-        v_min = 0.0
-        v_max = np.quantile(arr, 1.0 - clip) if clip < 1.0 else np.max(arr)
-        if not np.isfinite(v_max) or v_max <= v_min:
-            v_max = np.max(arr) + 1e-12
-        normed = (arr - v_min) / (v_max - v_min)
-        return np.clip(normed, 0.0, 1.0)
-
-    def _boost01(arr: np.ndarray, contrast: float) -> np.ndarray:
-        """Apply gamma-like contrast within [0,1] (contrast>1 boosts differences)."""
-        contrast = float(contrast)
-        if not np.isfinite(contrast) or contrast <= 0:
-            contrast = 1.0
-        return np.power(arr, 1.0 / contrast)
-
-    def _prep_energy_for_colors(energy_map: Dict) -> List[float]:
-        """Convert energy dict into boosted [0,1] values with a subtle glow floor."""
-        vals = [float(energy_map.get(n, 0.0)) for n in nodes]
-        arr = _as_float_array(vals)
-        if vis_log:
-            arr = np.log1p(np.maximum(arr, 0.0))
-        arr = _robust_unit(arr, vis_clip)
-        arr = _boost01(arr, vis_contrast)
-        # Give non-zero values a minimum glow so weak signals remain visible.
-        glow_floor = 0.04
-        arr = np.where(arr > 0.0, np.maximum(arr, glow_floor), 0.0)
-        return [float(v) for v in arr]
-
     # Reuse precomputed frames when provided to avoid resimulating on UI-only changes.
     if node_frames is None or edge_frames is None:
         node_frames, edge_frames = simulate_energy_flow(
@@ -851,35 +804,86 @@ def make_energy_flow_figure_3d(
             rw_impulse=bool(rw_impulse),
         )
 
+    # --- 1. Подготовка данных ---
     nodes = [n for n in G.nodes() if n in pos3d]
+    if not nodes:
+        return go.Figure()
+
+    node_frames = node_frames or [{}]
+    if edge_frames is None:
+        edge_frames = [{} for _ in range(len(node_frames))]
+    elif len(edge_frames) < len(node_frames):
+        # Гарантируем, что индексы кадров не выйдут за пределы списка.
+        edge_frames = list(edge_frames) + [{} for _ in range(len(node_frames) - len(edge_frames))]
+
     xs = [pos3d[n][0] for n in nodes]
     ys = [pos3d[n][1] for n in nodes]
     zs = [pos3d[n][2] for n in nodes]
 
-    base_node_opacity = float(base_node_opacity)
-    base_node_opacity = max(0.0, min(1.0, base_node_opacity))
-    hotspot_q = float(hotspot_q)
-    hotspot_q = max(0.0, min(0.999, hotspot_q))
-    hotspot_size_mult = max(1.0, float(hotspot_size_mult))
+    # --- 2. Логика цвета (ОГНЕННАЯ) ---
+    def _get_colors(energy_map: Dict) -> np.ndarray:
+        """Вернуть нормированные цвета узлов в [0, 1] с гамма-контрастом."""
+        vals = np.array([energy_map.get(n, 0.0) for n in nodes], dtype=float)
+        if vis_log:
+            vals = np.log1p(np.maximum(vals, 0.0))
 
-    def _energy_vec(frame_map: Dict) -> np.ndarray:
-        """Return log-scaled per-node energy for hotspot detection."""
-        vals = [float(frame_map.get(n, 0.0)) for n in nodes]
-        arr = _as_float_array(vals)
-        return np.log1p(np.maximum(arr, 0.0))
+        # Clip & Normalize: фиксируем 0, режем только верх.
+        v_max = np.quantile(vals, 1.0 - vis_clip) if vis_clip < 1.0 else np.max(vals)
+        if not np.isfinite(v_max) or v_max <= 0:
+            v_max = 1.0
+        vals = np.clip(vals / v_max, 0.0, 1.0)
 
-    def _hot_mask(ev: np.ndarray) -> np.ndarray:
-        """Mask nodes above the requested energy quantile."""
-        if ev.size == 0:
-            return np.zeros(0, dtype=bool)
-        thr = np.quantile(ev, hotspot_q)
-        return ev >= thr
+        # Gamma contrast (делаем средние значения ярче).
+        vals = np.power(vals, 1.0 / float(vis_contrast))
+        return vals
 
-    e0 = node_frames[0] if node_frames else {}
-    c0 = _prep_energy_for_colors(e0) if node_frames else [0.0 for _ in nodes]
-    ev0 = _energy_vec(e0) if node_frames else np.zeros(len(nodes), dtype=float)
+    # --- 3. Базовый слой (Скелет) ---
+    edges_all = []
+    flux_sum: Dict[Tuple, float] = {}
 
-    node_trace = go.Scatter3d(
+    # Считаем суммарный поток для выбора топ-ребер.
+    for fr in edge_frames:
+        for k, v in fr.items():
+            flux_sum[k] = flux_sum.get(k, 0.0) + float(v)
+
+    for u, v, d in G.edges(data=True):
+        if u in pos3d and v in pos3d:
+            w = float(d.get("weight", 1.0) or 1.0)
+            f = flux_sum.get((u, v), flux_sum.get((v, u), 0.0))
+            edges_all.append((u, v, w, f))
+
+    # Сортировка и обрезка.
+    edge_subset_mode = str(edge_subset_mode).lower().strip()
+    if edge_subset_mode == "top_flux":
+        edges_all.sort(key=lambda x: x[3], reverse=True)
+    elif edge_subset_mode == "top_weight":
+        edges_all.sort(key=lambda x: x[2], reverse=True)
+
+    max_edges_viz = int(max(0, max_edges_viz))
+    edges_viz = edges_all if edge_subset_mode == "all" else edges_all[:max_edges_viz or len(edges_all)]
+    if edge_subset_mode == "all" and max_edges_viz:
+        edges_viz = edges_viz[:max_edges_viz]
+
+    # Статический фон (серые тонкие линии).
+    base_x, base_y, base_z = [], [], []
+    for u, v, _, _ in edges_viz:
+        base_x.extend([pos3d[u][0], pos3d[v][0], None])
+        base_y.extend([pos3d[u][1], pos3d[v][1], None])
+        base_z.extend([pos3d[u][2], pos3d[v][2], None])
+
+    trace_edges_base = go.Scatter3d(
+        x=base_x,
+        y=base_y,
+        z=base_z,
+        mode="lines",
+        line=dict(color="rgba(255,255,255,0.05)", width=1),
+        hoverinfo="none",
+        name="structure",
+    )
+
+    # Начальное состояние узлов.
+    c0 = _get_colors(node_frames[0])
+    trace_nodes = go.Scatter3d(
         x=xs,
         y=ys,
         z=zs,
@@ -887,211 +891,125 @@ def make_energy_flow_figure_3d(
         marker=dict(
             size=int(node_size),
             color=c0,
-            colorscale="Plasma",
+            colorscale="Blackbody",
+            cmin=0,
+            cmax=1,
             showscale=True,
-            colorbar=dict(title="energy"),
-            opacity=base_node_opacity,
+            colorbar=dict(title="Energy", thickness=15, x=0),
         ),
-        text=[str(n) for n in nodes],
-        hoverinfo="text",
+        text=[f"{n}" for n in nodes],
         name="nodes",
     )
-    if show_labels:
-        node_trace.update(mode="markers+text", textposition="top center")
 
-    hm0 = _hot_mask(ev0)
-    xs_h = [xs[i] for i in range(len(nodes)) if hm0[i]]
-    ys_h = [ys[i] for i in range(len(nodes)) if hm0[i]]
-    zs_h = [zs[i] for i in range(len(nodes)) if hm0[i]]
-    cs_h = [float(ev0[i]) for i in range(len(nodes)) if hm0[i]]
-    hot_trace = go.Scatter3d(
-        x=xs_h,
-        y=ys_h,
-        z=zs_h,
-        mode="markers",
-        marker=dict(
-            size=float(node_size) * hotspot_size_mult,
-            color=cs_h,
-            colorscale="Turbo",
-            showscale=False,
-            opacity=0.95,
-        ),
-        hoverinfo="skip",
-        name="hotspots",
-    )
-
-    # --------------------------
-    # Edge subset for rendering
-    # --------------------------
-    edges_all = []
-    flux_map = edge_frames[0] if edge_frames else {}
-    for u, v, data in G.edges(data=True):
-        if u not in pos3d or v not in pos3d:
-            continue
-        weight = data.get("weight", 1.0)
-        try:
-            weight = float(weight)
-        except Exception:
-            weight = 1.0
-        flux_val = float(flux_map.get((u, v), flux_map.get((v, u), 0.0)))
-        edges_all.append((u, v, weight, flux_val))
-
-    max_edges_viz = int(max(0, max_edges_viz))
-    edge_subset_mode = str(edge_subset_mode).lower().strip()
-    if max_edges_viz and len(edges_all) > max_edges_viz:
-        if edge_subset_mode == "random":
-            rng = np.random.default_rng(12345)
-            idx = rng.choice(len(edges_all), size=max_edges_viz, replace=False)
-            edges_vis = [edges_all[i] for i in idx]
-        elif edge_subset_mode == "top_flux":
-            edges_vis = sorted(edges_all, key=lambda t: t[3], reverse=True)[:max_edges_viz]
-        else:
-            edges_vis = sorted(edges_all, key=lambda t: t[2], reverse=True)[:max_edges_viz]
-    else:
-        edges_vis = edges_all
-
-    # Base edges (faint, always present).
-    ex, ey, ez = [], [], []
-    for u, v, _, _ in edges_vis:
-        ex += [pos3d[u][0], pos3d[v][0], None]
-        ey += [pos3d[u][1], pos3d[v][1], None]
-        ez += [pos3d[u][2], pos3d[v][2], None]
-    base_edges = go.Scatter3d(
-        x=ex,
-        y=ey,
-        z=ez,
-        mode="lines",
-        line=dict(width=2, color="rgba(150,150,150,0.25)"),
-        hoverinfo="none",
-        name="edges",
-    )
-
-    overlay0 = _build_edge_overlay_traces(
-        pos3d,
-        edge_frames[0] if edge_frames else {},
-        nbins=int(edge_bins),
-        allowed_edges={(u, v) for u, v, _, _ in edges_vis},
-        vis_contrast=float(vis_contrast),
-        vis_clip=float(vis_clip),
-        vis_log=bool(vis_log),
-    )
-
-    # --------------------------
-    # Frames (downsampled)
-    # --------------------------
-    frame_stride = int(max(1, frame_stride))
-    frame_ids = list(range(0, len(node_frames), frame_stride))
+    # --- 4. Кадры анимации ---
     frames = []
-    for t in frame_ids:
-        et = node_frames[t]
-        ct = _prep_energy_for_colors(et)
-        evt = _energy_vec(et)
+    step_stride = max(1, int(frame_stride))
 
-        overlays = _build_edge_overlay_traces(
-            pos3d,
-            edge_frames[t] if t < len(edge_frames) else {},
-            nbins=int(edge_bins),
-            allowed_edges={(u, v) for u, v, _, _ in edges_vis},
-            vis_contrast=float(vis_contrast),
-            vis_clip=float(vis_clip),
-            vis_log=bool(vis_log),
-        )
+    for i in range(0, len(node_frames), step_stride):
+        # Узлы.
+        c_i = _get_colors(node_frames[i])
 
-        fr_data = []
-        node_frame_kwargs = dict(
-            x=xs,
-            y=ys,
-            z=zs,
-            mode=node_trace.mode,
-            marker=dict(
-                size=int(node_size),
-                color=ct,
-                colorscale="Plasma",
-                showscale=False,
-                opacity=base_node_opacity,
-            ),
-            text=[str(n) for n in nodes],
-            hoverinfo="skip",
-            name="nodes",
-        )
-        if show_labels:
-            node_frame_kwargs["textposition"] = "top center"
-        fr_data.append(go.Scatter3d(**node_frame_kwargs))
+        # Ребра (активный поток).
+        flux_map = edge_frames[i] if i < len(edge_frames) else {}
 
-        hmt = _hot_mask(evt)
-        xs_h = [xs[i] for i in range(len(nodes)) if hmt[i]]
-        ys_h = [ys[i] for i in range(len(nodes)) if hmt[i]]
-        zs_h = [zs[i] for i in range(len(nodes)) if hmt[i]]
-        cs_h = [float(evt[i]) for i in range(len(nodes)) if hmt[i]]
-        fr_data.append(
-            go.Scatter3d(
-                x=xs_h,
-                y=ys_h,
-                z=zs_h,
-                mode="markers",
-                marker=dict(
-                    size=float(node_size) * hotspot_size_mult,
-                    color=cs_h,
-                    colorscale="Turbo",
-                    showscale=False,
-                    opacity=0.95,
-                ),
-                hoverinfo="skip",
-                name="hotspots",
+        f_vals = [flux_map.get((u, v), flux_map.get((v, u), 0.0)) for u, v, _, _ in edges_viz]
+        f_max = max(f_vals) if f_vals else 1.0
+        if f_max <= 0:
+            f_max = 1.0
+
+        # В этом кадре собираем координаты для "горячих" ребер.
+        hot_x, hot_y, hot_z = [], [], []
+        for (u, v, _, _), f_val in zip(edges_viz, f_vals):
+            norm_f = float(f_val) / float(f_max)
+            if norm_f > 0.05:
+                hot_x.extend([pos3d[u][0], pos3d[v][0], None])
+                hot_y.extend([pos3d[u][1], pos3d[v][1], None])
+                hot_z.extend([pos3d[u][2], pos3d[v][2], None])
+
+        # Трейс 0: Nodes, Трейс 1: Base Edges (не меняется), Трейс 2: Active Flow.
+        frames.append(
+            go.Frame(
+                data=[
+                    go.Scatter3d(marker=dict(color=c_i)),
+                    go.Scatter3d(),
+                    go.Scatter3d(
+                        x=hot_x,
+                        y=hot_y,
+                        z=hot_z,
+                        mode="lines",
+                        line=dict(color="#ffaa00", width=4),
+                        opacity=0.6,
+                    ),
+                ],
+                name=str(i),
             )
         )
-        fr_data.append(base_edges)
-        fr_data.extend(overlays)
-        frames.append(go.Frame(data=fr_data, name=str(t)))
 
-    fig = go.Figure(data=[node_trace, hot_trace, base_edges, *overlay0], frames=frames)
+    # --- 5. Сборка фигуры ---
+    trace_flow = go.Scatter3d(
+        x=[],
+        y=[],
+        z=[],
+        mode="lines",
+        line=dict(color="#ffaa00", width=4),
+        name="flow",
+    )
+
+    fig = go.Figure(data=[trace_nodes, trace_edges_base, trace_flow], frames=frames)
+
+    # --- 6. Настройки анимации (Ключ к успеху) ---
     fig.update_layout(
         template="plotly_dark",
-        height=int(height),
-        margin=dict(l=0, r=0, t=30, b=0),
-        showlegend=False,
+        height=int(kwargs.get("height", height)),
         scene=dict(
-            xaxis=dict(showbackground=False, showticklabels=False, title=""),
-            yaxis=dict(showbackground=False, showticklabels=False, title=""),
-            zaxis=dict(showbackground=False, showticklabels=False, title=""),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+            aspectmode="data",
         ),
+        margin=dict(l=0, r=0, t=0, b=0),
         updatemenus=[
             dict(
                 type="buttons",
                 showactive=False,
-                y=0.02,
-                x=0.02,
-                xanchor="left",
-                yanchor="bottom",
+                y=0.05,
+                x=0.05,
                 buttons=[
                     dict(
-                        label="Play",
+                        label="▶ PLAY",
                         method="animate",
-                        args=[None, {"frame": {"duration": 120, "redraw": True}, "fromcurrent": True}],
+                        args=[
+                            None,
+                            dict(
+                                frame=dict(duration=int(anim_duration), redraw=True),
+                                fromcurrent=True,
+                                transition=dict(duration=int(anim_duration), easing="linear"),
+                            ),
+                        ],
                     ),
                     dict(
-                        label="Pause",
+                        label="⏸ PAUSE",
                         method="animate",
-                        args=[[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
+                        args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")],
                     ),
                 ],
             )
         ],
         sliders=[
             dict(
-                active=0,
-                y=0.02,
-                x=0.18,
-                len=0.78,
-                pad={"b": 10, "t": 0},
-                currentvalue={"prefix": "t="},
+                currentvalue=dict(prefix="Step: "),
                 steps=[
-                    {"args": [[str(t)], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}], "label": str(t), "method": "animate"}
-                    for t in frame_ids
+                    dict(
+                        args=[[str(k)], dict(frame=dict(duration=0, redraw=True), mode="immediate")],
+                        label=str(k),
+                        method="animate",
+                    )
+                    for k in range(len(frames))
                 ],
             )
         ],
     )
+
     return fig
 
 
@@ -1108,6 +1026,7 @@ def _build_edge_overlay_traces(
 
     When allowed_edges is provided, only those edges (undirected) are rendered.
     If vis_* settings are provided, apply robust scaling to emphasize differences.
+    Colors stay in a warm palette to align with the energy-flow view.
     """
     if not edge_values:
         return []
