@@ -10,6 +10,8 @@ import plotly.graph_objects as go
 
 from networkx.algorithms.community import modularity, louvain_communities
 
+from src.config import APPROX_EFFICIENCY_K, RICCI_CUTOFF, RICCI_MAX_SUPPORT
+from src.types import GraphMetrics
 from src.utils import as_simple_undirected, safe_float
 
 from src.robust_geom import (
@@ -103,7 +105,7 @@ def lcc_fraction(G: nx.Graph, N0: int) -> float:
         return 0.0
 
 
-def approx_weighted_efficiency(G: nx.Graph, sources_k: int = 32, seed: int = 0) -> float:
+def approx_weighted_efficiency(G: nx.Graph, sources_k: int = APPROX_EFFICIENCY_K, seed: int = 0) -> float:
     N = G.number_of_nodes()
     if N < 2 or G.number_of_edges() == 0:
         return 0.0
@@ -214,10 +216,10 @@ def calculate_metrics(
     seed: int,
     compute_curvature: bool = True,
     curvature_sample_edges: int = 150,
-    curvature_max_support: int = 60,
-    curvature_cutoff: float = 8.0,
+    curvature_max_support: int = RICCI_MAX_SUPPORT,
+    curvature_cutoff: float = RICCI_CUTOFF,
     **kwargs,
-) -> dict:
+) -> GraphMetrics:
     N = G.number_of_nodes()
     E = G.number_of_edges()
     # Back-compat: older callers used compute_heavy=True/False.
