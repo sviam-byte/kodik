@@ -7,7 +7,7 @@ import pandas as pd
 import networkx as nx
 
 from .metrics import calculate_metrics, add_dist_attr
-from src.utils import as_simple_undirected, get_node_strength
+from .utils import as_simple_undirected, get_node_strength
 
 
 def _pick_nodes_adaptive(

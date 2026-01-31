@@ -6,7 +6,7 @@ import numpy as np
 import plotly.express as px
 import streamlit as st
 
-from src.utils import safe_float
+from .utils import safe_float
 
 
 HELP_TEXT = {

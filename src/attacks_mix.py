@@ -14,7 +14,7 @@ from .entropy import (
     entropy_confidence,
     entropy_triangle_support,
 )
-from src.utils import as_simple_undirected, safe_float
+from .utils import as_simple_undirected, safe_float
 
 
 def _safe_attr_float(x, default: float = 1.0) -> float:

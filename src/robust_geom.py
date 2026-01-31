@@ -11,7 +11,7 @@ import numpy as np
 import networkx as nx
 from joblib import Parallel, delayed
 
-from src.utils import as_simple_undirected, safe_float
+from .utils import as_simple_undirected, safe_float
 
 # -----------------------------
 # Helpers
