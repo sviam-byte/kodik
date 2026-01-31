@@ -1425,7 +1425,7 @@ with tab_energy:
                 "Контраст (Gamma)",
                 0.5,
                 8.0,
-                3.0,
+                4.0,
                 0.1,
                 help="Чем выше, тем ярче будут видны даже слабые потоки.",
             )
@@ -1457,7 +1457,7 @@ with tab_energy:
                 "Порог «горячих точек»",
                 0.5,
                 0.99,
-                0.95,
+                0.98,
                 help="Верхний процент самых энергичных узлов, которые выделяются особо ярко.",
             )
             edge_subset_mode = st.selectbox(
@@ -1472,9 +1472,9 @@ with tab_energy:
             with st.expander("⚙️ 3. Параметры физической модели", expanded=True):
                 p1, p2, p3 = st.columns([1, 1, 1])
                 with p1:
-                    phys_inj = st.slider("Injection", 0.0, 1.0, 0.15, 0.01)
+                    phys_inj = st.slider("Injection", 0.0, 1.0, 0.5, 0.01)
                 with p2:
-                    phys_leak = st.slider("Leak", 0.0, 0.2, 0.02, 0.005)
+                    phys_leak = st.slider("Leak", 0.0, 0.2, 0.005, 0.005)
                 with p3:
                     phys_cap = st.selectbox("Capacity", ["strength", "degree"], index=0)
                 st.caption(
