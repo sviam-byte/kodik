@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import plotly.express as px
 import streamlit as st
 
 from .utils import safe_float
@@ -193,15 +192,28 @@ def render_dashboard_charts(G_view, apply_plot_defaults) -> None:
     st.markdown("### 📈 Распределения")
     d1, d2 = st.columns(2)
 
+    # Ленивый импорт: если plotly.express недоступен, используем graph_objects.
+    try:
+        import plotly.express as px
+        _use_px = True
+    except Exception:
+        px = None
+        _use_px = False
+        import plotly.graph_objects as go
+
     with d1:
         degrees = [d for _, d in G_view.degree()]
         if degrees:
-            fig_deg = px.histogram(
-                x=degrees,
-                nbins=30,
-                title="Degree Distribution",
-                labels={"x": "Degree", "y": "Count"},
-            )
+            if _use_px:
+                fig_deg = px.histogram(
+                    x=degrees,
+                    nbins=30,
+                    title="Degree Distribution",
+                    labels={"x": "Degree", "y": "Count"},
+                )
+            else:
+                fig_deg = go.Figure(data=[go.Histogram(x=degrees, nbinsx=30)])
+                fig_deg.update_layout(title="Degree Distribution", xaxis_title="Degree", yaxis_title="Count")
             fig_deg.update_layout(template="plotly_dark")
             apply_plot_defaults(fig_deg, height=620)
             st.plotly_chart(fig_deg, use_container_width=True, key="plot_deg_hist")
@@ -212,12 +224,16 @@ def render_dashboard_charts(G_view, apply_plot_defaults) -> None:
         weights = [safe_float(d.get("weight", 0.0), 0.0) for _, _, d in G_view.edges(data=True)]
         weights = [w for w in weights if np.isfinite(w)]
         if weights:
-            fig_w = px.histogram(
-                x=weights,
-                nbins=30,
-                title="Weight Distribution",
-                labels={"x": "Weight", "y": "Count"},
-            )
+            if _use_px:
+                fig_w = px.histogram(
+                    x=weights,
+                    nbins=30,
+                    title="Weight Distribution",
+                    labels={"x": "Weight", "y": "Count"},
+                )
+            else:
+                fig_w = go.Figure(data=[go.Histogram(x=weights, nbinsx=30)])
+                fig_w.update_layout(title="Weight Distribution", xaxis_title="Weight", yaxis_title="Count")
             fig_w.update_layout(template="plotly_dark")
             apply_plot_defaults(fig_w, height=620)
             st.plotly_chart(fig_w, use_container_width=True, key="plot_weight_hist")

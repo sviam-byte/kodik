@@ -1033,16 +1033,20 @@ with st.sidebar:
         f"{active_entry['id']}|{df_hash}|{src_col}|{dst_col}|"
         f"{float(min_conf)}|{float(min_weight)}|{analysis_mode}"
     )
-    load_graph = st.button("Load graph", type="primary", use_container_width=True)
-    if load_graph:
+    if st.button("Load graph", type="primary", use_container_width=True, key="load_graph_sidebar"):
         st.session_state["layout_seed_bump"] = int(st.session_state.get("layout_seed_bump", 0)) + 1
         st.session_state["__last_graph_key"] = graph_key
+        st.session_state["__do_load_graph"] = True
+        st.rerun()
 
 # Lazily build graph + metrics only after explicit user action.
 metrics_cache_key = f"metrics_{graph_key}"
 G_full = None
 G_view = None
 met = None
+
+# Centralized load trigger to ensure heavy work happens only after explicit rerun.
+load_graph = bool(st.session_state.pop("__do_load_graph", False))
 
 if load_graph:
     with st.spinner("Строю граф…"):
@@ -1149,21 +1153,24 @@ if G_view is None:
     if load_graph_main:
         st.session_state["layout_seed_bump"] = int(st.session_state.get("layout_seed_bump", 0)) + 1
         st.session_state["__last_graph_key"] = graph_key
-        load_graph = True
+        st.session_state["__do_load_graph"] = True
+        st.rerun()
 
-tab_main, tab_energy, tab_struct, tab_null, tab_attack, tab_compare = st.tabs([
+tab_labels = [
     "📊 Дэшборд",
     "⚡ Energy & Dynamics",
     "🕸️ Структура и 3D",
     "🧪 Нулевые модели",
     "💥 Attack Lab",
     "🆚 Сравнение",
-])
+]
+# Stateful nav prevents tab resets during frequent st.rerun() calls.
+selected_main_tab = st.radio("Разделы", tab_labels, horizontal=True, key="main_tab")
 
 # ------------------------------
 # TAB: DASHBOARD
 # ------------------------------
-with tab_main:
+if selected_main_tab == tab_labels[0]:
     if G_view is None:
         pass
     else:
@@ -1180,7 +1187,7 @@ with tab_main:
 # ------------------------------
 # TAB: ENERGY & DYNAMICS
 # ------------------------------
-with tab_energy:
+elif selected_main_tab == tab_labels[1]:
     st.header("⚡ Динамика и распространение (Energy Flow)")
 
     if G_view is None:
@@ -1328,7 +1335,7 @@ with tab_energy:
 # ------------------------------
 # TAB: STRUCTURE & 3D (static)
 # ------------------------------
-with tab_struct:
+elif selected_main_tab == tab_labels[2]:
     if G_view is None:
         pass
     else:
@@ -1449,7 +1456,7 @@ with tab_struct:
 # ------------------------------
 # TAB: NULL MODELS
 # ------------------------------
-with tab_null:
+elif selected_main_tab == tab_labels[3]:
     if G_view is None:
         pass
     else:
@@ -1510,7 +1517,7 @@ with tab_null:
         # ============================================================
         # 9) ATTACK LAB (Node + Edge, presets, multi-graph, AUC, phase)
         # ============================================================
-with tab_attack:
+elif selected_main_tab == tab_labels[4]:
     if G_view is None:
         pass
     else:
@@ -1730,9 +1737,16 @@ with tab_attack:
                     f" | critical_x ≈ {float(ph.get('critical_x', 0.0)):.3f}"
                 )
 
-            tabA, tabB, tabC = st.tabs(["📉 Curves", "🌀 Phase views", "🧊 3D step-by-step"])
+            attack_tabs = ["📉 Curves", "🌀 Phase views", "🧊 3D step-by-step"]
+            # Stateful selector avoids tab resets when animation uses st.rerun().
+            selected_attack_tab = st.radio(
+                "Просмотр результатов",
+                attack_tabs,
+                horizontal=True,
+                key="attack_results_tab",
+            )
 
-            with tabA:
+            if selected_attack_tab == attack_tabs[0]:
                 with st.expander("❔ Что означают метрики на графиках", expanded=False):
                     st.markdown(
                         "- **lcc_frac**: доля узлов в гигантской компоненте (порядковый параметр перколяции)\n"
@@ -1787,165 +1801,165 @@ with tab_attack:
                     """
                     st.text(textwrap.dedent(txt).strip())
 
-                with tabB:
-                    if xcol in df_res.columns and "lcc_frac" in df_res.columns:
-                        fig_lcc = px.line(df_res, x=xcol, y="lcc_frac", title="Order parameter: LCC fraction vs removed fraction")
-                        fig_lcc.update_layout(template="plotly_dark")
-                        fig_lcc = _apply_plot_defaults(fig_lcc, height=780, y_range=_auto_y_range(df_res["lcc_frac"]))
-                        st.plotly_chart(fig_lcc, use_container_width=True, key="plot_phase_lcc")
+            elif selected_attack_tab == attack_tabs[1]:
+                if xcol in df_res.columns and "lcc_frac" in df_res.columns:
+                    fig_lcc = px.line(df_res, x=xcol, y="lcc_frac", title="Order parameter: LCC fraction vs removed fraction")
+                    fig_lcc.update_layout(template="plotly_dark")
+                    fig_lcc = _apply_plot_defaults(fig_lcc, height=780, y_range=_auto_y_range(df_res["lcc_frac"]))
+                    st.plotly_chart(fig_lcc, use_container_width=True, key="plot_phase_lcc")
 
-                    if xcol in df_res.columns and "lcc_frac" in df_res.columns:
-                        dfp = df_res.sort_values(xcol).copy()
-                        dx = pd.to_numeric(dfp[xcol], errors="coerce").diff()
-                        dy = pd.to_numeric(dfp["lcc_frac"], errors="coerce").diff()
-                        dfp["suscep"] = (dy / dx).replace([np.inf, -np.inf], np.nan)
-                        fig_s = px.line(dfp, x=xcol, y="suscep", title="Susceptibility proxy: d(LCC)/dx")
-                        fig_s.update_layout(template="plotly_dark")
-                        fig_s = _apply_plot_defaults(fig_s, height=780, y_range=_auto_y_range(dfp["suscep"]))
-                        st.plotly_chart(fig_s, use_container_width=True, key="plot_phase_suscep")
+                if xcol in df_res.columns and "lcc_frac" in df_res.columns:
+                    dfp = df_res.sort_values(xcol).copy()
+                    dx = pd.to_numeric(dfp[xcol], errors="coerce").diff()
+                    dy = pd.to_numeric(dfp["lcc_frac"], errors="coerce").diff()
+                    dfp["suscep"] = (dy / dx).replace([np.inf, -np.inf], np.nan)
+                    fig_s = px.line(dfp, x=xcol, y="suscep", title="Susceptibility proxy: d(LCC)/dx")
+                    fig_s.update_layout(template="plotly_dark")
+                    fig_s = _apply_plot_defaults(fig_s, height=780, y_range=_auto_y_range(dfp["suscep"]))
+                    st.plotly_chart(fig_s, use_container_width=True, key="plot_phase_suscep")
 
-                    if "mod" in df_res.columns and "l2_lcc" in df_res.columns:
-                        dfp2 = df_res.copy()
-                        dfp2["mod"] = pd.to_numeric(dfp2["mod"], errors="coerce")
-                        dfp2["l2_lcc"] = pd.to_numeric(dfp2["l2_lcc"], errors="coerce")
-                        dfp2 = dfp2.dropna(subset=["mod", "l2_lcc"])
-                        if not dfp2.empty:
-                            fig_phase = px.line(dfp2, x="l2_lcc", y="mod", title="Phase portrait (trajectory): Q vs λ₂")
-                            fig_phase.update_layout(template="plotly_dark")
-                            fig_phase = _apply_plot_defaults(fig_phase, height=780)
-                            st.plotly_chart(fig_phase, use_container_width=True, key="plot_phase_portrait")
+                if "mod" in df_res.columns and "l2_lcc" in df_res.columns:
+                    dfp2 = df_res.copy()
+                    dfp2["mod"] = pd.to_numeric(dfp2["mod"], errors="coerce")
+                    dfp2["l2_lcc"] = pd.to_numeric(dfp2["l2_lcc"], errors="coerce")
+                    dfp2 = dfp2.dropna(subset=["mod", "l2_lcc"])
+                    if not dfp2.empty:
+                        fig_phase = px.line(dfp2, x="l2_lcc", y="mod", title="Phase portrait (trajectory): Q vs λ₂")
+                        fig_phase.update_layout(template="plotly_dark")
+                        fig_phase = _apply_plot_defaults(fig_phase, height=780)
+                        st.plotly_chart(fig_phase, use_container_width=True, key="plot_phase_portrait")
 
-                with tabC:
-                    edge_overlay_ui = st.selectbox(
-                        "Разметка рёбер (3D step-by-step)",
-                        [
-                            "Ricci sign (κ<0/κ>0)",
-                            "Energy flux (RW)",
-                            "Energy flux (Demetrius)",
-                            "Weight (log10)",
-                            "Confidence",
-                            "None",
-                        ],
-                        index=0,
-                        key="edge_overlay_tabc",
-                    )
-                    edge_overlay = "ricci"
-                    flow_mode = "rw"
-                    if edge_overlay_ui.startswith("Energy flux"):
-                        edge_overlay = "flux"
-                        flow_mode = "evo" if "Demetrius" in edge_overlay_ui else "rw"
-                    elif edge_overlay_ui.startswith("Weight"):
-                        edge_overlay = "weight"
-                    elif edge_overlay_ui.startswith("Confidence"):
-                        edge_overlay = "confidence"
-                    elif edge_overlay_ui.startswith("None"):
-                        edge_overlay = "none"
+            elif selected_attack_tab == attack_tabs[2]:
+                edge_overlay_ui = st.selectbox(
+                    "Разметка рёбер (3D step-by-step)",
+                    [
+                        "Ricci sign (κ<0/κ>0)",
+                        "Energy flux (RW)",
+                        "Energy flux (Demetrius)",
+                        "Weight (log10)",
+                        "Confidence",
+                        "None",
+                    ],
+                    index=0,
+                    key="edge_overlay_tabc",
+                )
+                edge_overlay = "ricci"
+                flow_mode = "rw"
+                if edge_overlay_ui.startswith("Energy flux"):
+                    edge_overlay = "flux"
+                    flow_mode = "evo" if "Demetrius" in edge_overlay_ui else "rw"
+                elif edge_overlay_ui.startswith("Weight"):
+                    edge_overlay = "weight"
+                elif edge_overlay_ui.startswith("Confidence"):
+                    edge_overlay = "confidence"
+                elif edge_overlay_ui.startswith("None"):
+                    edge_overlay = "none"
 
-                    base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
-                    pos_base = _layout_cached(
-                        active_entry["id"],
-                        df_hash,
-                        src_col,
-                        dst_col,
-                        float(min_conf),
-                        float(min_weight),
-                        analysis_mode,
-                        base_seed,
-                    )
+                base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
+                pos_base = _layout_cached(
+                    active_entry["id"],
+                    df_hash,
+                    src_col,
+                    dst_col,
+                    float(min_conf),
+                    float(min_weight),
+                    analysis_mode,
+                    base_seed,
+                )
 
-                    if fam == "mix":
-                        st.info("Для Mix/Entropy 3D-декомпозиция не поддерживается (нет порядка удаления).")
-                    elif fam == "node":
-                        removed_order = params.get("removed_order") or []
-                        if not removed_order:
-                            st.warning("Нет removed_order для 3D. (src.run_attack не дал, а fallback не сохранился.)")
-                        else:
-                            max_steps = max(1, len(df_res) - 1)
-                            step_val = st.slider("Шаг (3D)", 0, max_steps, int(st.session_state.get("__decomp_step", 0)), key="__decomp_step_slider")
-                            st.session_state["__decomp_step"] = int(step_val)
-
-                            play = st.toggle("▶ Play", value=False, key="play3d")
-                            fps = st.slider("FPS", 1, 10, 3, key="fps3d")
-
-                            frac_here = float(df_res.iloc[int(step_val)]["removed_frac"]) if "removed_frac" in df_res.columns else (step_val / max_steps)
-                            k_remove = int(round(frac_here * G_view.number_of_nodes()))
-                            k_remove = max(0, min(k_remove, len(removed_order)))
-
-                            removed_set = set(removed_order[:k_remove])
-                            H = as_simple_undirected(G_view).copy()
-                            H.remove_nodes_from([n for n in removed_set if H.has_node(n)])
-
-                            pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
-                            edge_traces, node_trace = make_3d_traces(
-                                H,
-                                pos_k,
-                                show_scale=True,
-                                edge_overlay=edge_overlay,
-                                flow_mode=flow_mode,
-                            )
-
-                            if node_trace is not None:
-                                fig = go.Figure(data=[*edge_traces, node_trace])
-                                fig.update_layout(template="plotly_dark", height=860, showlegend=False)
-                                fig.update_layout(title=f"Node removal | step={step_val}/{max_steps} | removed~{k_remove} | frac={frac_here:.3f}")
-                                st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_node_step")
-                            else:
-                                st.info("На этом шаге граф пуст.")
-
-                            if play:
-                                time.sleep(1.0 / float(fps))
-                                nxt = int(step_val) + 1
-                                if nxt > max_steps:
-                                    nxt = 0
-                                st.session_state["__decomp_step"] = nxt
-                                st.rerun()
-
+                if fam == "mix":
+                    st.info("Для Mix/Entropy 3D-декомпозиция не поддерживается (нет порядка удаления).")
+                elif fam == "node":
+                    removed_order = params.get("removed_order") or []
+                    if not removed_order:
+                        st.warning("Нет removed_order для 3D. (src.run_attack не дал, а fallback не сохранился.)")
                     else:
-                        removed_edges_order = params.get("removed_edges_order") or []
-                        total_edges = params.get("total_edges") or len(as_simple_undirected(G_view).edges())
-                        if not removed_edges_order:
-                            st.warning("Нет removed_edges_order для 3D.")
+                        max_steps = max(1, len(df_res) - 1)
+                        step_val = st.slider("Шаг (3D)", 0, max_steps, int(st.session_state.get("__decomp_step", 0)), key="__decomp_step_slider")
+                        st.session_state["__decomp_step"] = int(step_val)
+
+                        play = st.toggle("▶ Play", value=False, key="play3d")
+                        fps = st.slider("FPS", 1, 10, 3, key="fps3d")
+
+                        frac_here = float(df_res.iloc[int(step_val)]["removed_frac"]) if "removed_frac" in df_res.columns else (step_val / max_steps)
+                        k_remove = int(round(frac_here * G_view.number_of_nodes()))
+                        k_remove = max(0, min(k_remove, len(removed_order)))
+
+                        removed_set = set(removed_order[:k_remove])
+                        H = as_simple_undirected(G_view).copy()
+                        H.remove_nodes_from([n for n in removed_set if H.has_node(n)])
+
+                        pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
+                        edge_traces, node_trace = make_3d_traces(
+                            H,
+                            pos_k,
+                            show_scale=True,
+                            edge_overlay=edge_overlay,
+                            flow_mode=flow_mode,
+                        )
+
+                        if node_trace is not None:
+                            fig = go.Figure(data=[*edge_traces, node_trace])
+                            fig.update_layout(template="plotly_dark", height=860, showlegend=False)
+                            fig.update_layout(title=f"Node removal | step={step_val}/{max_steps} | removed~{k_remove} | frac={frac_here:.3f}")
+                            st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_node_step")
                         else:
-                            max_steps = max(1, len(df_res) - 1)
-                            step_val = st.slider("Шаг (3D)", 0, max_steps, int(st.session_state.get("__decomp_step", 0)), key="__decomp_step_slider_edge")
-                            st.session_state["__decomp_step"] = int(step_val)
+                            st.info("На этом шаге граф пуст.")
 
-                            play = st.toggle("▶ Play", value=False, key="play3d_edge")
-                            fps = st.slider("FPS", 1, 10, 3, key="fps3d_edge")
+                        if play:
+                            time.sleep(1.0 / float(fps))
+                            nxt = int(step_val) + 1
+                            if nxt > max_steps:
+                                nxt = 0
+                            st.session_state["__decomp_step"] = nxt
+                            st.rerun()
 
-                            frac_here = float(df_res.iloc[int(step_val)]["removed_frac"]) if "removed_frac" in df_res.columns else (step_val / max_steps)
-                            k_remove = int(round(frac_here * float(total_edges)))
-                            k_remove = max(0, min(k_remove, len(removed_edges_order)))
+                else:
+                    removed_edges_order = params.get("removed_edges_order") or []
+                    total_edges = params.get("total_edges") or len(as_simple_undirected(G_view).edges())
+                    if not removed_edges_order:
+                        st.warning("Нет removed_edges_order для 3D.")
+                    else:
+                        max_steps = max(1, len(df_res) - 1)
+                        step_val = st.slider("Шаг (3D)", 0, max_steps, int(st.session_state.get("__decomp_step", 0)), key="__decomp_step_slider_edge")
+                        st.session_state["__decomp_step"] = int(step_val)
 
-                            H = as_simple_undirected(G_view).copy()
-                            for (u, v) in removed_edges_order[:k_remove]:
-                                if H.has_edge(u, v):
-                                    H.remove_edge(u, v)
+                        play = st.toggle("▶ Play", value=False, key="play3d_edge")
+                        fps = st.slider("FPS", 1, 10, 3, key="fps3d_edge")
 
-                            pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
-                            edge_traces, node_trace = make_3d_traces(
-                                H,
-                                pos_k,
-                                show_scale=True,
-                                edge_overlay=edge_overlay,
-                                flow_mode=flow_mode,
-                            )
+                        frac_here = float(df_res.iloc[int(step_val)]["removed_frac"]) if "removed_frac" in df_res.columns else (step_val / max_steps)
+                        k_remove = int(round(frac_here * float(total_edges)))
+                        k_remove = max(0, min(k_remove, len(removed_edges_order)))
 
-                            if node_trace is not None:
-                                fig = go.Figure(data=[*edge_traces, node_trace])
-                                fig.update_layout(template="plotly_dark", height=860, showlegend=False)
-                                fig.update_layout(title=f"Edge removal | step={step_val}/{max_steps} | removed~{k_remove} edges | frac={frac_here:.3f}")
-                                st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_edge_step")
-                            else:
-                                st.info("На этом шаге граф пуст.")
+                        H = as_simple_undirected(G_view).copy()
+                        for (u, v) in removed_edges_order[:k_remove]:
+                            if H.has_edge(u, v):
+                                H.remove_edge(u, v)
 
-                            if play:
-                                time.sleep(1.0 / float(fps))
-                                nxt = int(step_val) + 1
-                                if nxt > max_steps:
-                                    nxt = 0
-                                st.session_state["__decomp_step"] = nxt
-                                st.rerun()
+                        pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
+                        edge_traces, node_trace = make_3d_traces(
+                            H,
+                            pos_k,
+                            show_scale=True,
+                            edge_overlay=edge_overlay,
+                            flow_mode=flow_mode,
+                        )
+
+                        if node_trace is not None:
+                            fig = go.Figure(data=[*edge_traces, node_trace])
+                            fig.update_layout(template="plotly_dark", height=860, showlegend=False)
+                            fig.update_layout(title=f"Edge removal | step={step_val}/{max_steps} | removed~{k_remove} edges | frac={frac_here:.3f}")
+                            st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_edge_step")
+                        else:
+                            st.info("На этом шаге граф пуст.")
+
+                        if play:
+                            time.sleep(1.0 / float(fps))
+                            nxt = int(step_val) + 1
+                            if nxt > max_steps:
+                                nxt = 0
+                            st.session_state["__decomp_step"] = nxt
+                            st.rerun()
 
         st.markdown("---")
 
@@ -2138,7 +2152,7 @@ with tab_attack:
         # ============================================================
         # 10) COMPARE TAB (saved graphs + saved experiments)
         # ============================================================
-with tab_compare:
+elif selected_main_tab == tab_labels[5]:
     if G_view is None:
         pass
     else:
