@@ -7,19 +7,7 @@ import pandas as pd
 import networkx as nx
 
 from .metrics import calculate_metrics, add_dist_attr
-from src.utils import as_simple_undirected
-
-
-def _strength(G: nx.Graph, n) -> float:
-    """Weighted strength for a node (sum of incident edge weights)."""
-    strength = 0.0
-    for _, _, d in G.edges(n, data=True):
-        w = d.get("weight", 1.0)
-        try:
-            strength += float(w)
-        except Exception:
-            strength += 1.0
-    return float(strength)
+from src.utils import as_simple_undirected, get_node_strength
 
 
 def _pick_nodes_adaptive(
@@ -46,7 +34,7 @@ def _pick_nodes_adaptive(
         return nodes[:k]
 
     if attack_kind == "weak_strength":
-        nodes.sort(key=lambda n: _strength(H, n))
+        nodes.sort(key=lambda n: get_node_strength(H, n))
         return nodes[:k]
 
     return None

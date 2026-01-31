@@ -28,6 +28,17 @@ from compute import compute_curvature as compute_curvature_cached
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
+from src.config import (
+    ANIMATION_DURATION_MS,
+    APPROX_EFFICIENCY_K,
+    DEFAULT_DAMPING,
+    DEFAULT_INJECTION,
+    DEFAULT_LEAK,
+    DEFAULT_SEED,
+    PLOT_HEIGHT,
+    RICCI_CUTOFF,
+    RICCI_MAX_SUPPORT,
+)
 from src.metrics import (
     calculate_metrics,
     compute_3d_layout,
@@ -42,14 +53,19 @@ from src.attacks import run_attack
 from src.attacks_mix import run_mix_attack
 from src.plotting import fig_metrics_over_steps, fig_compare_attacks
 from src.phase import classify_phase_transition
-from src.ui_blocks import help_icon, render_dashboard_metrics, render_dashboard_charts
+from src.ui_blocks import (
+    help_icon,
+    inject_custom_css,
+    render_dashboard_metrics,
+    render_dashboard_charts,
+)
 from src.session_io import (
     export_workspace_json,
     import_workspace_json,
     export_experiments_json,
     import_experiments_json,
 )
-from src.utils import as_simple_undirected
+from src.utils import as_simple_undirected, get_node_strength
 
 # -----------------------------
 # Streamlit caching helpers
@@ -103,7 +119,7 @@ def _metrics_cached(
     G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
     return calculate_metrics(
         G,
-        eff_sources_k=32,
+        eff_sources_k=APPROX_EFFICIENCY_K,
         seed=int(seed),
         compute_curvature=bool(compute_curvature),
         curvature_sample_edges=int(curvature_sample_edges),
@@ -169,56 +185,7 @@ def _quick_counts(df: pd.DataFrame, src_col: str, dst_col: str) -> tuple[int, in
     nodes = pd.unique(pd.concat([df[src_col], df[dst_col]], ignore_index=True))
     return int(len(nodes)), int(len(df))
 
-st.markdown(
-    """
-    <style>
-    /* --- STICKY HEADER FIXES --- */
-    div[data-testid="stVerticalBlock"] > div:has(> div.sticky-header) {
-        position: sticky;
-        top: 2.8rem; /* Offset for Streamlit's own top bar */
-        z-index: 9999;
-        background-color: #0e1117;
-        border-bottom: 1px solid rgba(250, 250, 250, 0.1);
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-    }
-    /* Ensure tabs don't overlap with sticky header */
-    .stTabs {
-        margin-top: 1rem;
-        z-index: 1;
-    }
-
-    /* --- BUTTON STYLING --- */
-    div.stButton > button {
-        border-radius: 8px;
-        font-weight: 500;
-        transition: all 0.2s ease-in-out;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    div.stButton > button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-        border-color: rgba(255, 255, 255, 0.3);
-    }
-    div.stButton > button:active {
-        transform: translateY(0px);
-    }
-    /* Primary button specific styling */
-    div.stButton > button[kind="primary"] {
-        background: linear-gradient(90deg, #ff4b4b 0%, #ff2b2b 100%);
-        border: none;
-    }
-
-    /* --- METRICS & TEXT --- */
-    div[data-testid="stMetricValue"] { font-size: 1.35rem !important; }
-    .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
-        font-size: 1.05rem;
-        font-weight: 650;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+inject_custom_css()
 METRIC_HELP = {
     "lcc_frac": "Доля узлов в гигантской компоненте связности. Параметр порядка для перколяции.",
     "eff_w": "Глобальная эффективность (среднее 1/кратчайшему пути; аппрокс по k источникам).",
@@ -294,16 +261,6 @@ def _forward_fill_heavy(df_hist: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].replace([np.inf, -np.inf], np.nan).ffill()
     return df
 
-def _strength(G: nx.Graph, n):
-    s = 0.0
-    for _, _, d in G.edges(n, data=True):
-        w = d.get("weight", 1.0)
-        try:
-            s += float(w)
-        except Exception:
-            s += 1.0
-    return s
-
 def _extract_removed_order(aux):
     if isinstance(aux, dict):
         for k in ["removed_nodes", "removed_order", "order", "removal_order", "removed"]:
@@ -340,7 +297,7 @@ def _fallback_removal_order(G: nx.Graph, kind: str, seed: int):
         return nodes
 
     if kind in ("weak_strength",): 
-        nodes.sort(key=lambda n: _strength(H, n))
+        nodes.sort(key=lambda n: get_node_strength(H, n))
         return nodes
 
     if kind in ("betweenness",):
@@ -361,7 +318,7 @@ def _fallback_removal_order(G: nx.Graph, kind: str, seed: int):
             return nodes
 
     if kind in ("richclub_top",):
-        nodes.sort(key=lambda n: _strength(H, n), reverse=True)
+        nodes.sort(key=lambda n: get_node_strength(H, n), reverse=True)
         return nodes
 
     rng.shuffle(nodes)
@@ -468,7 +425,13 @@ def run_edge_attack(
         if kind.startswith("ricci_") or kind == "flux_high_rw_x_neg_ricci":
             for (u, v) in sampled:
                 try:
-                    val = ollivier_ricci_edge(H0, u, v, max_support=60, cutoff=8.0)
+                    val = ollivier_ricci_edge(
+                        H0,
+                        u,
+                        v,
+                        max_support=RICCI_MAX_SUPPORT,
+                        cutoff=RICCI_CUTOFF,
+                    )
                 except Exception:
                     val = None
                 if val is None or not np.isfinite(val):
@@ -580,11 +543,12 @@ def run_edge_attack(
 # 4) STATE
 # ============================================================
 def _init_state():
+    """Ensure session state is initialized with stable defaults."""
     defaults = {
         "graphs": {},                 
         "experiments": [],            
         "active_graph_id": None,
-        "seed": 42,
+        "seed": DEFAULT_SEED,
         "last_upload_hash": None,
         "layout_seed_bump": 0,
         "last_suite_curves": None,
@@ -875,7 +839,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📈 Визуализация")
     if "plot_height" not in st.session_state:
-        st.session_state["plot_height"] = 900
+        st.session_state["plot_height"] = PLOT_HEIGHT
     if "norm_mode" not in st.session_state:
         st.session_state["norm_mode"] = "none"
 
@@ -1256,8 +1220,14 @@ with tab_energy:
         with c2:
             st.subheader("2. Параметры потока")
             if flow_mode_ui == "phys":
-                phys_inj = st.slider("Сила впрыска (Injection)", 0.1, 5.0, 1.0, 0.1)
-                phys_leak = st.slider("Утечка (Leak)", 0.0, 0.1, 0.005, 0.001)
+                phys_inj = st.slider(
+                    "Сила впрыска (Injection)",
+                    0.1,
+                    5.0,
+                    DEFAULT_INJECTION,
+                    0.1,
+                )
+                phys_leak = st.slider("Утечка (Leak)", 0.0, 0.1, DEFAULT_LEAK, 0.001)
                 phys_cap = st.selectbox("Емкость узлов", ["strength", "degree"])
                 st.session_state["__phys_injection"] = phys_inj
                 st.session_state["__phys_leak"] = phys_leak
@@ -1279,7 +1249,7 @@ with tab_energy:
                 "Скорость анимации (мс/кадр)",
                 50,
                 1000,
-                150,
+                ANIMATION_DURATION_MS,
                 50,
                 help="Больше = медленнее. Позволяет вращать граф во время полета.",
             )
@@ -1311,8 +1281,8 @@ with tab_energy:
                 src_key = tuple(final_sources) if final_sources else tuple()
 
                 # Параметры физики берем из стейта или дефолтов.
-                inj_val = float(st.session_state.get("__phys_injection", 1.0))
-                leak_val = float(st.session_state.get("__phys_leak", 0.005))
+                inj_val = float(st.session_state.get("__phys_injection", DEFAULT_INJECTION))
+                leak_val = float(st.session_state.get("__phys_leak", DEFAULT_LEAK))
                 cap_val = str(st.session_state.get("__phys_cap", "strength"))
 
                 node_frames, edge_frames = _energy_frames_cached(
@@ -1325,7 +1295,7 @@ with tab_energy:
                     analysis_mode,
                     steps=int(flow_steps),
                     flow_mode=str(flow_mode_ui),
-                    damping=0.98,  # Дефолт.
+                    damping=DEFAULT_DAMPING,  # Дефолт.
                     sources=src_key,
                     phys_injection=inj_val,
                     phys_leak=leak_val,

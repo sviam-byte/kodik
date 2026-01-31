@@ -41,3 +41,11 @@ def safe_float(x, default: float = 0.0) -> float:
         return val if np.isfinite(val) else default
     except (ValueError, TypeError):
         return default
+
+
+def get_node_strength(G: nx.Graph, n) -> float:
+    """Сумма весов всех инцидентных ребер узла."""
+    strength = 0.0
+    for _, _, d in G.edges(n, data=True):
+        strength += safe_float(d.get("weight", 1.0), 1.0)
+    return float(strength)
